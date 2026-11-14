@@ -286,14 +286,6 @@ test('truncated pull file lists fail closed for resolution', async () => {
       reason: /truncated \(3000 of 3001 changed files\)/,
     },
     {
-      name: 'companion file list shorter than changed_files',
-      app: appPull(),
-      appFiles: [{ filename: 'e2e-companion.json', status: 'modified' }],
-      backend: backendPull(34, { changedFiles: 2 }),
-      backendFiles: [{ filename: 'e2e-companion.json', status: 'modified' }],
-      reason: /truncated \(1 of 2 changed files\)/,
-    },
-    {
       name: 'missing changed_files with the cap reached',
       app: appPull(12, { changedFiles: null }),
       appFiles: fullPage,
@@ -356,6 +348,7 @@ test('truncation propagates from companion checks and previous-companion invalid
   const closed = new FakeGitHub({
     ...validPairRoutes({ app: closedApp }),
     ...appStatuses(APP_SHA, []),
+    ...backendStatuses(BACKEND_SHA, []),
     'GET /repos/DFXswiss/app/pulls/12/files?per_page=100': [{ filename: 'e2e-companion.json', status: 'modified' }],
   });
   const { deps: closedDeps } = deps(closed);
@@ -367,6 +360,7 @@ test('truncation propagates from companion checks and previous-companion invalid
   const openCompanion = new FakeGitHub({
     ...validPairRoutes({ app: appPull(12, { state: 'closed', merged: false }) }),
     ...appStatuses(APP_SHA, []),
+    ...backendStatuses(BACKEND_SHA, []),
     [`GET /repos/DFXswiss/app/contents/e2e-companion.json?ref=${APP_SHA}`]: content(companion(BACKEND_REPO, 35)),
     'GET /repos/DFXswiss/backend/pulls/35': backendPull(35, { changedFiles: 2 }),
     'GET /repos/DFXswiss/backend/pulls/35/files?per_page=100': [{ filename: 'e2e-companion.json', status: 'modified' }],
@@ -384,6 +378,8 @@ test('truncation propagates from companion checks and previous-companion invalid
   const previous = new FakeGitHub({
     ...openPairWithLocalRuns(),
     ...appStatuses(APP_SHA, []),
+    ...backendStatuses(BACKEND_SHA, []),
+    ...backendStatuses(PREVIOUS_BACKEND_SHA, []),
     'GET /repos/DFXswiss/backend/pulls/35': backendPull(35, { sha: PREVIOUS_BACKEND_SHA, changedFiles: 2 }),
     'GET /repos/DFXswiss/backend/pulls/35/files?per_page=100': [{ filename: 'e2e-companion.json', status: 'modified' }],
     [`GET /repos/DFXswiss/app/contents/e2e-companion.json?ref=${PREVIOUS_SHA}`]: content(companion(BACKEND_REPO, 35)),
@@ -400,6 +396,329 @@ test('truncation propagates from companion checks and previous-companion invalid
     true,
   );
   assert.match(previousErrors[0], /truncated/);
+});
+
+test('a truncated companion file list is an invalid pair', async () => {
+  const { GitHubClient } = await import('./github.mjs');
+  const fake = new FakeGitHub(
+    validPairRoutes({
+      backend: backendPull(34, { changedFiles: 2 }),
+      backendFiles: [{ filename: 'e2e-companion.json', status: 'modified' }],
+    }),
+  );
+  const result = await inspectPair({
+    client: new GitHubClient({ token: 't', fetchImpl: fake.fetch.bind(fake) }),
+    startRepo: APP_REPO,
+    startPr: 12,
+  });
+  assert.equal(result.valid, false);
+  assert.match(result.reason, /DFXswiss\/backend#34 file list is incomplete; pairing cannot be verified/);
+  assert.equal(result.backend_pull.number, 34);
+});
+
+test('inspectPair still propagates a non-truncation error from the companion file list', async () => {
+  const { GitHubClient } = await import('./github.mjs');
+  const fake = new FakeGitHub({
+    ...validPairRoutes(),
+    'GET /repos/DFXswiss/backend/pulls/34/files?per_page=100': { status: 502 },
+  });
+  await assert.rejects(
+    () =>
+      inspectPair({
+        client: new GitHubClient({ token: 't', fetchImpl: fake.fetch.bind(fake) }),
+        startRepo: APP_REPO,
+        startPr: 12,
+      }),
+    /failed \(502\)/,
+  );
+});
+
+test('the fail-closed helper finds the companion from the start head without an App status', async () => {
+  const fake = new FakeGitHub({
+    'GET /repos/DFXswiss/app/pulls/12': appPull(),
+    'GET /repos/DFXswiss/backend/pulls/34': backendPull(34),
+    'GET /repos/DFXswiss/backend/pulls/34/files?per_page=100': [{ filename: 'e2e-companion.json', status: 'modified' }],
+    [`GET /repos/DFXswiss/app/contents/e2e-companion.json?ref=${APP_SHA}`]: content(companion(BACKEND_REPO, 34)),
+    [`GET /repos/DFXswiss/app/commits/${APP_SHA}/statuses?per_page=100`]: [],
+    [`GET /repos/DFXswiss/backend/commits/${BACKEND_SHA}/statuses?per_page=100`]: [
+      status({
+        description: pairDescription(78),
+      }),
+    ],
+    [`POST /repos/DFXswiss/backend/statuses/${BACKEND_SHA}`]: { id: 1 },
+    ...localRunRoutes({
+      repo: BACKEND_REPO,
+      sha: BACKEND_SHA,
+      runId: 20,
+      jobId: 201,
+      path: '.github/workflows/api-pr.yaml',
+    }),
+  });
+  const { deps: injected } = deps(fake);
+  const original = new Error('start file list is truncated');
+  const { GitHubClient } = await import('./github.mjs');
+  const client = new GitHubClient({ token: 't', fetchImpl: fake.fetch.bind(fake) });
+
+  await assert.rejects(
+    () =>
+      failClosedAfterError(
+        client,
+        { E2E_PAIR_APP_SLUG: SLUG, RUN_URL },
+        injected,
+        APP_REPO,
+        12,
+        original,
+      ),
+    (error) => error === original,
+  );
+  const posted = fake.statusPosts();
+  assert.deepEqual(
+    posted.map((post) => `${post.key} ${post.body.state}`),
+    [`POST /repos/DFXswiss/backend/statuses/${BACKEND_SHA} failure`],
+  );
+  assert.deepEqual(
+    fake.reruns().map((call) => call.key),
+    ['POST /repos/DFXswiss/backend/actions/jobs/201/rerun'],
+  );
+
+  const fromBackend = new FakeGitHub({
+    'GET /repos/DFXswiss/backend/pulls/34': backendPull(34),
+    'GET /repos/DFXswiss/app/pulls/12': appPull(),
+    [`GET /repos/DFXswiss/backend/contents/e2e-companion.json?ref=${BACKEND_SHA}`]: content(companion(APP_REPO, 12)),
+    [`GET /repos/DFXswiss/backend/commits/${BACKEND_SHA}/statuses?per_page=100`]: [],
+    [`GET /repos/DFXswiss/app/commits/${APP_SHA}/statuses?per_page=100`]: [status({ description: pairDescription() })],
+    [`POST /repos/DFXswiss/app/statuses/${APP_SHA}`]: { id: 1 },
+    ...localRunRoutes({ repo: APP_REPO, sha: APP_SHA, runId: 10, jobId: 101, path: '.github/workflows/pr.yml' }),
+  });
+  const { deps: fromBackendDeps } = deps(fromBackend);
+  const fromBackendClient = new GitHubClient({ token: 't', fetchImpl: fromBackend.fetch.bind(fromBackend) });
+  await assert.rejects(
+    () =>
+      failClosedAfterError(
+        fromBackendClient,
+        { E2E_PAIR_APP_SLUG: SLUG, RUN_URL, PREVIOUS_SHA: BACKEND_SHA },
+        fromBackendDeps,
+        BACKEND_REPO,
+        34,
+        original,
+      ),
+    (error) => error === original,
+  );
+  assert.deepEqual(
+    fromBackend.statusPosts().map((post) => `${post.key} ${post.body.state}`),
+    [`POST /repos/DFXswiss/app/statuses/${APP_SHA} failure`],
+  );
+  assert.deepEqual(
+    fromBackend.reruns().map((call) => call.key),
+    ['POST /repos/DFXswiss/app/actions/jobs/101/rerun'],
+  );
+});
+
+test('invalidate on a backend push finds the previous app companion without a start-head status', async () => {
+  const fake = new FakeGitHub({
+    'GET /repos/DFXswiss/backend/pulls/34': backendPull(34, { changedFiles: 2 }),
+    'GET /repos/DFXswiss/backend/pulls/34/files?per_page=100': [
+      { filename: 'e2e-companion.json', status: 'modified' },
+    ],
+    [`GET /repos/DFXswiss/backend/commits/${BACKEND_SHA}/statuses?per_page=100`]: [],
+    [`GET /repos/DFXswiss/backend/contents/e2e-companion.json?ref=${BACKEND_SHA}`]: { status: 404 },
+    [`GET /repos/DFXswiss/backend/contents/e2e-companion.json?ref=${PREVIOUS_BACKEND_SHA}`]: content(
+      companion(APP_REPO, 12),
+    ),
+    'GET /repos/DFXswiss/app/pulls/12': appPull(),
+    [`GET /repos/DFXswiss/app/commits/${APP_SHA}/statuses?per_page=100`]: [status({ description: pairDescription() })],
+    [`POST /repos/DFXswiss/app/statuses/${APP_SHA}`]: { id: 1 },
+    ...localRunRoutes({
+      repo: APP_REPO,
+      sha: APP_SHA,
+      runId: 10,
+      jobId: 101,
+      path: '.github/workflows/pr.yml',
+    }),
+  });
+  const { deps: injected, errors } = deps(fake);
+  assert.equal(
+    await main(['invalidate'], {
+      ...injected,
+      env: {
+        ...injected.env,
+        START_REPO: BACKEND_REPO,
+        START_PR: '34',
+        PREVIOUS_SHA: PREVIOUS_BACKEND_SHA,
+        RUN_URL,
+      },
+    }),
+    1,
+  );
+  assert.match(errors.at(-1), /truncated/);
+  assert.deepEqual(
+    fake.statusPosts().map((post) => `${post.key} ${post.body.state}`),
+    [`POST /repos/DFXswiss/app/statuses/${APP_SHA} failure`],
+  );
+  assert.deepEqual(
+    fake.reruns().map((call) => call.key),
+    ['POST /repos/DFXswiss/app/actions/jobs/101/rerun'],
+  );
+});
+
+test('the fail-closed helper leaves a fallback companion that names a different backend unchanged', async () => {
+  const { GitHubClient } = await import('./github.mjs');
+  const fake = new FakeGitHub({
+    'GET /repos/DFXswiss/app/pulls/12': appPull(),
+    'GET /repos/DFXswiss/backend/pulls/34': backendPull(34),
+    [`GET /repos/DFXswiss/app/contents/e2e-companion.json?ref=${APP_SHA}`]: { status: 404 },
+    [`GET /repos/DFXswiss/app/contents/e2e-companion.json?ref=${PREVIOUS_SHA}`]: content(companion(BACKEND_REPO, 34)),
+    [`GET /repos/DFXswiss/app/commits/${APP_SHA}/statuses?per_page=100`]: [],
+    [`GET /repos/DFXswiss/backend/commits/${BACKEND_SHA}/statuses?per_page=100`]: [
+      status({ description: `pair app#12@${APP_SHA} backend#35@${BACKEND_SHA} run 78` }),
+    ],
+  });
+  const { deps: injected } = deps(fake);
+  const original = new Error('start file list is truncated');
+
+  await assert.rejects(
+    () =>
+      failClosedAfterError(
+        new GitHubClient({ token: 't', fetchImpl: fake.fetch.bind(fake) }),
+        { E2E_PAIR_APP_SLUG: SLUG, RUN_URL, PREVIOUS_SHA },
+        injected,
+        APP_REPO,
+        12,
+        original,
+      ),
+    (error) => error === original,
+  );
+  assert.equal(fake.statusPosts().length, 0);
+  assert.equal(fake.reruns().length, 0);
+
+  const unreadable = new FakeGitHub({
+    'GET /repos/DFXswiss/app/pulls/12': appPull(),
+    [`GET /repos/DFXswiss/app/contents/e2e-companion.json?ref=${APP_SHA}`]: new Error('offline'),
+    [`GET /repos/DFXswiss/app/contents/e2e-companion.json?ref=${PREVIOUS_SHA}`]: content('bad'),
+    [`GET /repos/DFXswiss/app/commits/${APP_SHA}/statuses?per_page=100`]: [],
+  });
+  const { deps: unreadableDeps, errors: unreadableErrors } = deps(unreadable);
+  await assert.rejects(
+    () =>
+      failClosedAfterError(
+        new GitHubClient({ token: 't', fetchImpl: unreadable.fetch.bind(unreadable) }),
+        { E2E_PAIR_APP_SLUG: SLUG, RUN_URL, PREVIOUS_SHA },
+        unreadableDeps,
+        APP_REPO,
+        12,
+        original,
+      ),
+    (error) => error === original,
+  );
+  const fallbackErrors = unreadableErrors.filter((message) => /fail-closed companion fallback failed/.test(message));
+  assert.equal(fallbackErrors.length, 2);
+  assert.match(fallbackErrors[0], /offline/);
+  assert.match(fallbackErrors[1], /invalid e2e-companion\.json/);
+});
+
+test('reconcile invalidates the pair when the companion file list is truncated', async () => {
+  const fake = new FakeGitHub({
+    ...openPulls([12]),
+    ...validPairRoutes({ backend: backendPull(34, { changedFiles: 2 }) }),
+    'GET /repos/DFXswiss/backend/pulls/34/files?per_page=100': [{ filename: 'e2e-companion.json', status: 'modified' }],
+    ...appStatuses(APP_SHA, [status({ description: pairDescription() })]),
+    ...localRunRoutes({ repo: APP_REPO, sha: APP_SHA, runId: 10, jobId: 101, path: '.github/workflows/pr.yml' }),
+    [`POST /repos/DFXswiss/app/statuses/${APP_SHA}`]: { id: 1 },
+  });
+  const { deps: injected, errors, logs } = deps(fake);
+  assert.equal(await main(['reconcile'], { ...injected, env: reconcileEnv() }), 0);
+  assert.equal(errors.length, 0);
+  const posted = fake.statusPosts();
+  assert.deepEqual(
+    posted.map((post) => `${post.key} ${post.body.state}`),
+    [
+      `POST /repos/DFXswiss/app/statuses/${APP_SHA} pending`,
+      `POST /repos/DFXswiss/app/statuses/${APP_SHA} failure`,
+    ],
+  );
+  assert.match(posted[1].body.description, /file list is incomplete/);
+  assert.deepEqual(
+    fake.reruns().map((call) => call.key),
+    ['POST /repos/DFXswiss/app/actions/jobs/101/rerun'],
+  );
+  assert.match(logs.join('\n'), /reconcile app#12: invalidated/);
+});
+
+test('invalidate posts the normal invalid status when the companion file list is truncated', async () => {
+  const fake = new FakeGitHub({
+    ...validPairRoutes({ backend: backendPull(34, { changedFiles: 2 }) }),
+    'GET /repos/DFXswiss/backend/pulls/34/files?per_page=100': [{ filename: 'e2e-companion.json', status: 'modified' }],
+    ...localRunRoutes({ repo: APP_REPO, sha: APP_SHA, runId: 10, jobId: 101, path: '.github/workflows/pr.yml' }),
+    [`POST /repos/DFXswiss/app/statuses/${APP_SHA}`]: { id: 1 },
+  });
+  const { deps: injected, errors } = deps(fake);
+  assert.equal(
+    await main(['invalidate'], {
+      ...injected,
+      env: { ...injected.env, START_REPO: APP_REPO, START_PR: '12', RUN_URL },
+    }),
+    0,
+  );
+  assert.equal(errors.length, 0);
+  const posted = fake.statusPosts();
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].key, `POST /repos/DFXswiss/app/statuses/${APP_SHA}`);
+  assert.equal(posted[0].body.state, 'pending');
+  assert.equal(posted[0].body.description, 'pair re-evaluation pending');
+  assert.deepEqual(
+    fake.reruns().map((call) => call.key),
+    ['POST /repos/DFXswiss/app/actions/jobs/101/rerun'],
+  );
+});
+
+test('reconcile fails closed when the visited file list is truncated', async () => {
+  const fake = new FakeGitHub({
+    ...openPulls([12]),
+    'GET /repos/DFXswiss/app/pulls/12': appPull(12, { changedFiles: 2 }),
+    'GET /repos/DFXswiss/app/pulls/12/files?per_page=100': [{ filename: 'e2e-companion.json', status: 'modified' }],
+    ...appStatuses(APP_SHA, [status({ description: pairDescription() })]),
+    [`POST /repos/DFXswiss/app/statuses/${APP_SHA}`]: { id: 1 },
+    ...localRunRoutes({ repo: APP_REPO, sha: APP_SHA, runId: 10, jobId: 101, path: '.github/workflows/pr.yml' }),
+  });
+  const { deps: injected, logs } = deps(fake);
+  assert.equal(await main(['reconcile'], { ...injected, env: reconcileEnv() }), 1);
+  const posted = fake.statusPosts();
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].key, `POST /repos/DFXswiss/app/statuses/${APP_SHA}`);
+  assert.equal(posted[0].body.state, 'failure');
+  assert.deepEqual(
+    fake.reruns().map((call) => call.key),
+    ['POST /repos/DFXswiss/app/actions/jobs/101/rerun'],
+  );
+  assert.match(logs.join('\n'), /1 failed/);
+});
+
+test('reconcile leaves a GitHub outage without changing a status', async () => {
+  const fake = new FakeGitHub({
+    ...openPulls([12]),
+    ...validPairRoutes(),
+    'GET /repos/DFXswiss/backend/pulls/34/files?per_page=100': { status: 502 },
+    ...appStatuses(APP_SHA, [status({ description: pairDescription() })]),
+    [`POST /repos/DFXswiss/app/statuses/${APP_SHA}`]: { id: 1 },
+  });
+  const { deps: injected, errors, logs } = deps(fake);
+  assert.equal(await main(['reconcile'], { ...injected, env: reconcileEnv() }), 1);
+  assert.equal(fake.statusPosts().length, 0);
+  assert.equal(fake.reruns().length, 0);
+  assert.match(errors.join('\n'), /failed \(502\)/);
+  assert.match(logs.join('\n'), /1 failed/);
+
+  const cleanupFails = new FakeGitHub({
+    ...openPulls([12]),
+    'GET /repos/DFXswiss/app/pulls/12': appPull(12, { changedFiles: 2 }),
+    'GET /repos/DFXswiss/app/pulls/12/files?per_page=100': [{ filename: 'e2e-companion.json', status: 'modified' }],
+    [`GET /repos/DFXswiss/app/commits/${APP_SHA}/statuses?per_page=100`]: { status: 500 },
+  });
+  const { deps: cleanupFailsDeps, errors: cleanupFailsErrors } = deps(cleanupFails);
+  assert.equal(await main(['reconcile'], { ...cleanupFailsDeps, env: reconcileEnv() }), 1);
+  assert.equal(cleanupFails.statusPosts().length, 0);
+  assert.match(cleanupFailsErrors.join('\n'), /fail-closed status lookup failed/);
+  assert.match(cleanupFailsErrors.join('\n'), /::error::reconcile app#12: .*file list.*truncated/);
 });
 
 test('invalidate on a push rethrows a truncated current-pair file list', async () => {
@@ -561,7 +880,8 @@ test('the fail-closed helper still rethrows the original error when its own look
   assert.match(lookupErrors.at(-1), /pull offline/);
 
   const cleanup = new FakeGitHub({
-    ...validPairRoutes({ backend: backendPull(34, { changedFiles: 2 }) }),
+    ...validPairRoutes({ app: appPull(12, { changedFiles: 2 }) }),
+    ...backendStatuses(BACKEND_SHA, []),
     [`GET /repos/DFXswiss/app/commits/${APP_SHA}/statuses?per_page=100`]: [status({ description: pairDescription() })],
     [`POST /repos/DFXswiss/app/statuses/${APP_SHA}`]: new Error('post offline'),
   });
@@ -574,7 +894,7 @@ test('the fail-closed helper still rethrows the original error when its own look
 test('the fail-closed helper skips starts it cannot prove are open', async () => {
   const cases = [
     ['missing start', {}, 1],
-    ['closed start', { 'GET /repos/DFXswiss/app/pulls/12': appPull(12, { state: 'closed', merged: false }) }, 2],
+    ['closed start', { 'GET /repos/DFXswiss/app/pulls/12': appPull(12, { state: 'closed', merged: false }) }, 3],
     ['invalid start head', { 'GET /repos/DFXswiss/app/pulls/12': appPull(12, { sha: 'bad' }) }, 1],
   ];
   for (const [name, routes, expectedCalls] of cases) {
@@ -3048,6 +3368,7 @@ test('invalidate on close rejects a missing target URL', async () => {
   const fake = new FakeGitHub({
     ...validPairRoutes({ app: closedApp }),
     ...appStatuses(APP_SHA, []),
+    ...backendStatuses(BACKEND_SHA, []),
     [`GET /repos/DFXswiss/app/contents/e2e-companion.json?ref=${APP_SHA}`]: content(companion(BACKEND_REPO, 34)),
   });
   const { deps: injected, errors } = deps(fake);

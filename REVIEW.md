@@ -39,9 +39,9 @@ Reject the pull request when any of these is true:
   to 60 minutes and then reruns that local `Full-stack E2E` job after it posts
   the result. Each
   repository's review state is checked with its own guard pin and the guard
-  identity from `.github/e2e-pairing/guard-identities.json`; a merged companion
-  is matched through its merge commit, and a companion closed without merge is
-  a failure.
+  identity from `.github/e2e-pairing/guard-identities.json`; a companion merged
+  into `develop` is matched through its merge commit; a companion closed
+  without merge, or merged into `main` or any other base, is a failure.
   The coordinator also reconciles every open paired pull request in both
   repositories every 30 minutes, on any base, and repairs divergent and stale
   pending statuses. It catches a retarget away from `develop` and any

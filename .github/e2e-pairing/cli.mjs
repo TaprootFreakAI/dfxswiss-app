@@ -604,7 +604,18 @@ export async function inspectPair({ client, startRepo, startPr }) {
   setSide(result, companionRepo, companionPull);
   const companionEffective = effectivePullHead(companionPull);
   setEffective(result, companionRepo, companionEffective);
-  const companionFiles = await pullFiles(client, companionRepo, companionPr, companionPull);
+  let companionFiles;
+  try {
+    companionFiles = await pullFiles(client, companionRepo, companionPr, companionPull);
+  } catch (error) {
+    if (error.code === 'pull-files-truncated') {
+      return invalidateResult(
+        result,
+        `${companionRepo}#${companionPr} file list is incomplete; pairing cannot be verified`,
+      );
+    }
+    throw error;
+  }
   if (!isCompanionActive(companionFiles)) {
     return invalidateResult(result, `${COMPANION_PATH} is not active for ${companionRepo}#${companionPr}`);
   }
@@ -804,20 +815,21 @@ export async function failClosedAfterError(client, env, deps, startRepo, startPr
   const creatorLogin = `${slug}[bot]`;
   const reason = `pair could not be verified: ${error?.message || error}`;
   const heads = new Map();
-  const collectHead = (repo, pull, { companion = false } = {}) => {
+  const collectHead = (repo, pull, { companion = false, pair = null } = {}) => {
     const sha = pullHeadSha(pull);
     if (pull?.state === 'open' && SHA_RE.test(sha)) {
-      heads.set(`${repo}@${sha}`, { repo, sha, companion });
+      heads.set(`${repo}@${sha}`, { repo, sha, companion, pair });
     }
   };
-  let startPair = null;
+  let startSha = '';
+  let startPairFound = false;
   const newestAppStatus = async (repo, sha) => {
     const statuses = await client.paginate(`/repos/${repo}/commits/${sha}/statuses?per_page=100`);
     return selectAttestedStatus(statuses, { context: STATUS_CONTEXT, creatorLogin });
   };
   try {
     const startPull = await getPullOrNull(client, startRepo, startPr);
-    const startSha = pullHeadSha(startPull);
+    startSha = pullHeadSha(startPull);
     if (startPull?.state === 'open') {
       collectHead(startRepo, startPull);
     }
@@ -825,14 +837,44 @@ export async function failClosedAfterError(client, env, deps, startRepo, startPr
       const statuses = await client.paginate(`/repos/${startRepo}/commits/${startSha}/statuses?per_page=100`);
       const pair = newestStatusPair(statuses, creatorLogin);
       if (pair !== null) {
-        startPair = pair;
+        startPairFound = true;
         const companionRepo = otherRepository(startRepo);
         const companionPr = startRepo === APP_REPO ? pair.backend_pr : pair.app_pr;
-        collectHead(companionRepo, await getPullOrNull(client, companionRepo, companionPr), { companion: true });
+        collectHead(companionRepo, await getPullOrNull(client, companionRepo, companionPr), {
+          companion: true,
+          pair: { app_pr: pair.app_pr, backend_pr: pair.backend_pr },
+        });
       }
     }
   } catch (lookupError) {
     deps.error(`::error::fail-closed status lookup failed: ${String(lookupError)}`);
+  }
+  if (SHA_RE.test(startSha) && !startPairFound) {
+    const companionRepo = otherRepository(startRepo);
+    const refs = [startSha];
+    const previous = previousSha(env);
+    if (previous && previous !== startSha) {
+      refs.push(previous);
+    }
+    for (const ref of refs) {
+      try {
+        const text = await companionText(client, startRepo, ref);
+        if (text === null) {
+          continue;
+        }
+        const companion = parseCompanion(text, companionRepo);
+        const pair =
+          startRepo === APP_REPO
+            ? { app_pr: startPr, backend_pr: companion.pull_request }
+            : { app_pr: companion.pull_request, backend_pr: startPr };
+        collectHead(companionRepo, await getPullOrNull(client, companionRepo, companion.pull_request), {
+          companion: true,
+          pair,
+        });
+      } catch (fallbackError) {
+        deps.error(`::error::fail-closed companion fallback failed for ${startRepo}@${ref}: ${String(fallbackError)}`);
+      }
+    }
   }
   for (const head of heads.values()) {
     try {
@@ -844,8 +886,8 @@ export async function failClosedAfterError(client, env, deps, startRepo, startPr
         const statusPair = parseStatusPair(newest);
         if (
           statusPair === null ||
-          statusPair.app_pr !== startPair.app_pr ||
-          statusPair.backend_pr !== startPair.backend_pr
+          statusPair.app_pr !== head.pair.app_pr ||
+          statusPair.backend_pr !== head.pair.backend_pr
         ) {
           continue;
         }
@@ -1511,12 +1553,20 @@ async function reconcileCommand(client, env, deps, reviewGate) {
   const handledPairs = new Set();
   for (const { repo, pull } of pulls) {
     const pr = Number(pull?.number);
+    let validPull = false;
     try {
       requirePositiveInteger(pr, 'pull request number');
+      validPull = true;
       await reconcilePull(client, env, deps, slug, repo, pr, reviewGate, handledPairs);
     } catch (error) {
       failed += 1;
-      deps.error(`::error::reconcile ${repositoryLabel(repo)}#${pull?.number ?? '?'}: ${error.message}`);
+      if (validPull && error instanceof PairingError) {
+        await failClosedAfterError(client, env, deps, repo, pr, error).catch((cleanupError) => {
+          deps.error(`::error::reconcile ${repositoryLabel(repo)}#${pr}: ${cleanupError.message}`);
+        });
+      } else {
+        deps.error(`::error::reconcile ${repositoryLabel(repo)}#${pull?.number ?? '?'}: ${error.message}`);
+      }
     }
   }
   deps.log(`reconciled ${pulls.length} open pull requests across both repositories; ${failed} failed`);
