@@ -315,7 +315,7 @@ async function failOpenCompanion(
   deps.log(
     `failed open companion ${repositoryLabel(companionRepo)}#${openCompanion.pull.number} after a closed-unmerged pair`,
   );
-  return true;
+  return { repo: companionRepo, pr: openCompanion.pull.number };
 }
 
 function setSide(result, repo, pull) {
@@ -804,12 +804,13 @@ export async function failClosedAfterError(client, env, deps, startRepo, startPr
   const creatorLogin = `${slug}[bot]`;
   const reason = `pair could not be verified: ${error?.message || error}`;
   const heads = new Map();
-  const collectHead = (repo, pull) => {
+  const collectHead = (repo, pull, { companion = false } = {}) => {
     const sha = pullHeadSha(pull);
     if (pull?.state === 'open' && SHA_RE.test(sha)) {
-      heads.set(`${repo}@${sha}`, { repo, sha });
+      heads.set(`${repo}@${sha}`, { repo, sha, companion });
     }
   };
+  let startPair = null;
   const newestAppStatus = async (repo, sha) => {
     const statuses = await client.paginate(`/repos/${repo}/commits/${sha}/statuses?per_page=100`);
     return selectAttestedStatus(statuses, { context: STATUS_CONTEXT, creatorLogin });
@@ -824,9 +825,10 @@ export async function failClosedAfterError(client, env, deps, startRepo, startPr
       const statuses = await client.paginate(`/repos/${startRepo}/commits/${startSha}/statuses?per_page=100`);
       const pair = newestStatusPair(statuses, creatorLogin);
       if (pair !== null) {
+        startPair = pair;
         const companionRepo = otherRepository(startRepo);
         const companionPr = startRepo === APP_REPO ? pair.backend_pr : pair.app_pr;
-        collectHead(companionRepo, await getPullOrNull(client, companionRepo, companionPr));
+        collectHead(companionRepo, await getPullOrNull(client, companionRepo, companionPr), { companion: true });
       }
     }
   } catch (lookupError) {
@@ -837,6 +839,16 @@ export async function failClosedAfterError(client, env, deps, startRepo, startPr
       const newest = await newestAppStatus(head.repo, head.sha);
       if (newest === null || (newest.state !== 'success' && newest.state !== 'pending')) {
         continue;
+      }
+      if (head.companion) {
+        const statusPair = parseStatusPair(newest);
+        if (
+          statusPair === null ||
+          statusPair.app_pr !== startPair.app_pr ||
+          statusPair.backend_pr !== startPair.backend_pr
+        ) {
+          continue;
+        }
       }
       await client.postStatus(head.repo, head.sha, {
         state: 'failure',
@@ -875,7 +887,7 @@ export async function finalizeResolution(client, result, env, deps, { rerun = tr
       await rerunOpenSides(client, result);
     }
   }
-  await postResolutionState(client, result, env, { rerunReviewPending });
+  await postResolutionState(client, result, env, { rerun, rerunReviewPending });
   const outputs = outputValues(result);
   deps.writeOutputs(outputs, env);
   deps.log(
@@ -1131,7 +1143,9 @@ async function resolveValidatedCommand(client, env, deps, reviewGate, startRepo,
   let openPairInvalidated = false;
   let rerunReviewPending = false;
   if (env.EVENT_NAME === 'repository_dispatch') {
-    closedCompanionFailed = await failClosedStartCompanion(client, result, env, deps, startRepo, startPr, { repend: true });
+    closedCompanionFailed = Boolean(
+      await failClosedStartCompanion(client, result, env, deps, startRepo, startPr, { repend: true }),
+    );
     // failOpenCompanion has just proven mutuality from both current heads.
     result.mutual = result.mutual || closedCompanionFailed;
   }
@@ -1459,11 +1473,16 @@ async function reconcilePull(client, env, deps, slug, repo, pr, reviewGate, hand
       ? await failOpenCompanion(client, env, deps, companionRepo, companionPr, { repend: true })
       : false;
   if (failedCompanion) {
-    markHandled();
     deps.log(
-      `reconcile ${repositoryLabel(repo)}#${pr}: failed the open companion ${repositoryLabel(companionRepo)}#${companionPr}`,
+      `reconcile ${repositoryLabel(repo)}#${pr}: failed the open companion ${repositoryLabel(failedCompanion.repo)}#${failedCompanion.pr}`,
     );
-    return true;
+    if (failedCompanion.repo === repo && failedCompanion.pr === pr) {
+      markHandled();
+      return true;
+    }
+    deps.log(
+      `reconcile ${repositoryLabel(repo)}#${pr}: failed companion ${repositoryLabel(failedCompanion.repo)}#${failedCompanion.pr} belongs to another pair, invalidating the current pair`,
+    );
   }
   // Post the pending invalidation and rerun local jobs before replacing it
   // with the final resolution status, as the event-driven paths do.

@@ -749,6 +749,71 @@ test('the fail-closed helper finds a closed start companion from an older pair s
   );
 });
 
+test('the fail-closed helper leaves a companion that names another pair unchanged', async () => {
+  const secondAppSha = '9'.repeat(40);
+  const cases = [
+    [
+      'another pair',
+      status({ description: `pair app#13@${secondAppSha} backend#34@${BACKEND_SHA} run 78` }),
+      1,
+    ],
+    [
+      'another backend',
+      status({ description: `pair app#12@${APP_SHA} backend#35@${BACKEND_SHA} run 78` }),
+      1,
+    ],
+    ['same pair', status({ description: pairDescription() }), 2],
+    ['unparseable', status({ description: 'pair re-evaluation pending' }), 1],
+  ];
+  for (const [name, companionStatus, expectedPosts] of cases) {
+    const fake = new FakeGitHub({
+      ...localRunRoutes({ repo: BACKEND_REPO, sha: BACKEND_SHA, runId: 20, jobId: 201, path: '.github/workflows/api-pr.yaml' }),
+      ...localRunRoutes({ repo: APP_REPO, sha: APP_SHA, runId: 10, jobId: 101, path: '.github/workflows/pr.yml' }),
+      'GET /repos/DFXswiss/backend/pulls/34': backendPull(),
+      [`GET /repos/DFXswiss/backend/commits/${BACKEND_SHA}/statuses?per_page=100`]: [status({ description: pairDescription() })],
+      'GET /repos/DFXswiss/app/pulls/12': appPull(),
+      [`GET /repos/DFXswiss/app/commits/${APP_SHA}/statuses?per_page=100`]: [companionStatus],
+      [`POST /repos/DFXswiss/backend/statuses/${BACKEND_SHA}`]: { id: 1 },
+      [`POST /repos/DFXswiss/app/statuses/${APP_SHA}`]: { id: 2 },
+    });
+    const { GitHubClient } = await import('./github.mjs');
+    const client = new GitHubClient({ token: 't', fetchImpl: fake.fetch.bind(fake) });
+    const original = new Error('original failure');
+
+    await assert.rejects(
+      () =>
+        failClosedAfterError(
+          client,
+          { E2E_PAIR_APP_SLUG: SLUG, RUN_URL },
+          { error: () => {} },
+          BACKEND_REPO,
+          34,
+          original,
+        ),
+      (error) => error === original,
+      name,
+    );
+
+    assert.deepEqual(
+      fake.statusPosts().map((post) => post.key),
+      [
+        `POST /repos/DFXswiss/backend/statuses/${BACKEND_SHA}`,
+        ...(name === 'same pair' ? [`POST /repos/DFXswiss/app/statuses/${APP_SHA}`] : []),
+      ],
+      name,
+    );
+    assert.equal(fake.statusPosts().length, expectedPosts, name);
+    assert.deepEqual(
+      fake.reruns().map((call) => call.key),
+      [
+        'POST /repos/DFXswiss/backend/actions/jobs/201/rerun',
+        ...(name === 'same pair' ? ['POST /repos/DFXswiss/app/actions/jobs/101/rerun'] : []),
+      ],
+      name,
+    );
+  }
+});
+
 test('the fail-closed helper collects only heads with an actionable App status', async () => {
   const companionCases = [
     // inspectPair throws on the truncated start file list before it reads the
@@ -1241,6 +1306,32 @@ test('resolve posts a running marker on every open head and writes outputs', asy
   assert.equal(posted[1].body.description, runningDescription(77));
   assert.equal(fake.reruns().length, 2);
   assert.match(logs.at(-1), /Pair resolved/);
+});
+
+test('an invalid dispatch reruns each open local job only once', async () => {
+  const fake = new FakeGitHub({
+    ...openPairWithLocalRuns(),
+    ...validPairRoutes({ backend: backendPull(34, { base: 'release' }) }),
+    'GET /repos/DFXswiss/backend/pulls/34': backendPull(34, { base: 'release' }),
+    ...localRunRoutes({ repo: APP_REPO, sha: APP_SHA, runId: 10, jobId: 101, path: '.github/workflows/pr.yml' }),
+    ...localRunRoutes({ repo: BACKEND_REPO, sha: BACKEND_SHA, runId: 20, jobId: 201, path: '.github/workflows/api-pr.yaml' }),
+    [`POST /repos/DFXswiss/app/statuses/${APP_SHA}`]: { id: 1 },
+    [`POST /repos/DFXswiss/backend/statuses/${BACKEND_SHA}`]: { id: 2 },
+  });
+  const { deps: injected, writes } = deps(fake);
+  assert.equal(
+    await main(['resolve'], {
+      ...injected,
+      env: { ...injected.env, ...resolveEnv(), EVENT_NAME: 'repository_dispatch', START_REPO: APP_REPO, START_PR: '12' },
+    }),
+    0,
+  );
+  assert.equal(writes[0][0].valid, 'false');
+  assert.equal(writes[0][0].review_pending, 'false');
+  assert.deepEqual(fake.reruns().map((call) => call.key), [
+    'POST /repos/DFXswiss/app/actions/jobs/101/rerun',
+    'POST /repos/DFXswiss/backend/actions/jobs/201/rerun',
+  ]);
 });
 
 test('resolve turns review-gate misses into pending and does not rerun', async () => {
@@ -3882,6 +3973,50 @@ test('reconcile fails the open app head when the backend closed without merging'
   assert.equal(posted[1].body.description, 'companion closed without merge');
   assert.match(logs.join('\n'), /failed open companion/);
   assert.equal(fake.reruns().length, 1);
+});
+
+test('reconcile invalidates the visited pair after failing a switched companion', async () => {
+  const otherBackendSha = '9'.repeat(40);
+  const fake = new FakeGitHub({
+    ...openPulls([12], [34]),
+    'GET /repos/DFXswiss/app/pulls/12': appPull(12, { state: 'closed', merged: false }),
+    'GET /repos/DFXswiss/app/pulls/12/files?per_page=100': [{ filename: 'e2e-companion.json', status: 'modified' }],
+    [`GET /repos/DFXswiss/app/contents/e2e-companion.json?ref=${APP_SHA}`]: content(companion(BACKEND_REPO, 35)),
+    'GET /repos/DFXswiss/backend/pulls/34': backendPull(34),
+    'GET /repos/DFXswiss/backend/pulls/34/files?per_page=100': [{ filename: 'e2e-companion.json', status: 'modified' }],
+    [`GET /repos/DFXswiss/backend/contents/e2e-companion.json?ref=${BACKEND_SHA}`]: content(companion(APP_REPO, 12)),
+    'GET /repos/DFXswiss/backend/pulls/35': backendPull(35, { sha: otherBackendSha }),
+    'GET /repos/DFXswiss/backend/pulls/35/files?per_page=100': [{ filename: 'e2e-companion.json', status: 'modified' }],
+    [`GET /repos/DFXswiss/backend/contents/e2e-companion.json?ref=${otherBackendSha}`]: content(companion(APP_REPO, 12)),
+    ...appStatuses(APP_SHA, [status({ description: pairDescription() })]),
+    ...backendStatuses(BACKEND_SHA, [status({ description: pairDescription() })]),
+    ...backendStatuses(otherBackendSha, [status({ description: `pair app#12@${APP_SHA} backend#35@${otherBackendSha} run 78` })]),
+    ...localRunRoutes({ repo: APP_REPO, sha: APP_SHA, runId: 10, jobId: 101, path: '.github/workflows/pr.yml' }),
+    ...localRunRoutes({ repo: BACKEND_REPO, sha: BACKEND_SHA, runId: 20, jobId: 201, path: '.github/workflows/api-pr.yaml' }),
+    ...localRunRoutes({ repo: BACKEND_REPO, sha: otherBackendSha, runId: 30, jobId: 301, path: '.github/workflows/api-pr.yaml' }),
+    [`POST /repos/DFXswiss/app/statuses/${APP_SHA}`]: { id: 1 },
+    [`POST /repos/DFXswiss/backend/statuses/${BACKEND_SHA}`]: { id: 2 },
+    [`POST /repos/DFXswiss/backend/statuses/${otherBackendSha}`]: { id: 3 },
+  });
+  const { deps: injected, logs } = deps(fake);
+  assert.equal(await main(['reconcile'], { ...injected, env: reconcileEnv() }), 0);
+  const posted = fake.statusPosts();
+  assert.deepEqual(
+    posted.map((post) => `${post.key} ${post.body.state}`),
+    [
+      `POST /repos/DFXswiss/backend/statuses/${otherBackendSha} pending`,
+      `POST /repos/DFXswiss/backend/statuses/${otherBackendSha} failure`,
+      `POST /repos/DFXswiss/backend/statuses/${BACKEND_SHA} pending`,
+      `POST /repos/DFXswiss/backend/statuses/${BACKEND_SHA} failure`,
+    ],
+  );
+  assert.equal(posted[1].body.description, 'companion closed without merge');
+  assert.match(posted[3].body.description, /companion closed without merge/);
+  assert.deepEqual(fake.reruns().map((call) => call.key), [
+    'POST /repos/DFXswiss/backend/actions/jobs/301/rerun',
+    'POST /repos/DFXswiss/backend/actions/jobs/201/rerun',
+  ]);
+  assert.match(logs.join('\n'), /failed companion backend#35 belongs to another pair/);
 });
 
 test('reconcile invalidates a stale success when a head moved and never starts a shared run', async () => {
