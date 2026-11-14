@@ -4,7 +4,8 @@
  *   /support/dashboard/issue/:id, /support/user/:id, /notes, /templates
  *
  * Covers role denial for plain customers, screen-specific render assertions, and write paths
- * (create issue, update state, staff reply, notes, templates) verified in Postgres.
+ * (create issue, update state, staff reply, notes, templates, transfer of a support attachment into
+ * the KYC file) verified in Postgres.
  */
 
 import type { Page } from '@playwright/test';
@@ -359,7 +360,9 @@ test.describe('Support dashboard (staff)', () => {
     });
     const seededMessage = 'Customer uploaded the company shareholder list.';
     await expect(messagesPanel.getByText(seededMessage)).toBeVisible({ timeout: 15000 });
-    const attachmentButton = page.getByRole('button', { name: new RegExp(`${attachmentName}$`) });
+    const attachmentButton = page.getByRole('button', {
+      name: new RegExp(`${attachmentName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`),
+    });
     await expect(attachmentButton).toBeVisible({ timeout: 15000 });
     await page.getByRole('button', { name: 'Transfer to KYC file', exact: true }).click();
     await expect(page.getByPlaceholder('Document title')).toBeVisible();
