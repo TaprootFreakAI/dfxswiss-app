@@ -1172,14 +1172,16 @@ async function resolveValidatedCommand(client, env, deps, reviewGate, startRepo,
     await invalidateOpenPair(client, result, env);
     openPairInvalidated = true;
   }
+  if (env.EVENT_NAME === 'repository_dispatch') {
+    await evaluateChattyTrigger(client, result, env, deps);
+  }
   if (result.already_handled) {
+    if (env.EVENT_NAME === 'repository_dispatch') {
+      await invalidatePreviousCompanion(client, env, deps, startRepo, startPr, result);
+    }
     return finalizeResolution(client, result, env, deps);
   }
   if (env.EVENT_NAME === 'repository_dispatch') {
-    await evaluateChattyTrigger(client, result, env, deps);
-    if (result.already_handled) {
-      return finalizeResolution(client, result, env, deps);
-    }
     await invalidateOpenPair(client, result, env);
     openPairInvalidated = result.paired === true;
     await invalidatePreviousCompanion(client, env, deps, startRepo, startPr, result);

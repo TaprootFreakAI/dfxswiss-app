@@ -1800,6 +1800,45 @@ test('a dispatch cancels a previous run even without the current run id', async 
   assert.equal(writes[0][0].reason, 'pair already attested or running');
 });
 
+test('a skipped dispatch still invalidates the previous companion', async () => {
+  const fake = new FakeGitHub({
+    ...openPairWithLocalRuns(),
+    [`GET /repos/DFXswiss/app/commits/${APP_SHA}/statuses?per_page=100`]: [status({ description: pairDescription() })],
+    [`GET /repos/DFXswiss/backend/commits/${BACKEND_SHA}/statuses?per_page=100`]: [status({ description: pairDescription() })],
+    [`GET /repos/DFXswiss/backend/commits/${PREVIOUS_BACKEND_SHA}/statuses?per_page=100`]: [],
+    [`GET /repos/DFXswiss/backend/contents/e2e-companion.json?ref=${PREVIOUS_BACKEND_SHA}`]: content(companion(APP_REPO, 99)),
+    'GET /repos/DFXswiss/app/pulls/99': appPull(99, { sha: PREVIOUS_SHA }),
+    'GET /repos/DFXswiss/app/pulls/99/files?per_page=100': [{ filename: 'e2e-companion.json', status: 'modified' }],
+    [`GET /repos/DFXswiss/app/contents/e2e-companion.json?ref=${PREVIOUS_SHA}`]: content(companion(BACKEND_REPO, 34)),
+    [`GET /repos/DFXswiss/app/commits/${PREVIOUS_SHA}/statuses?per_page=100`]: [
+      status({ description: `pair app#99@${PREVIOUS_SHA} backend#34@${PREVIOUS_BACKEND_SHA} run 76` }),
+    ],
+    ...localRunRoutes({ repo: APP_REPO, sha: PREVIOUS_SHA, runId: 30, jobId: 301, path: '.github/workflows/pr.yml' }),
+    [`POST /repos/DFXswiss/app/statuses/${PREVIOUS_SHA}`]: { id: 3 },
+  });
+  const { deps: injected, writes } = deps(fake);
+  const code = await main(['resolve'], {
+    ...injected,
+    env: {
+      ...injected.env,
+      ...resolveEnv(),
+      EVENT_NAME: 'repository_dispatch',
+      START_REPO: BACKEND_REPO,
+      START_PR: '34',
+      PREVIOUS_SHA: PREVIOUS_BACKEND_SHA,
+    },
+  });
+  assert.equal(code, 0);
+  assert.equal(writes[0][0].reason, 'pair already attested or running');
+  const posted = fake.statusPosts();
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].key, `POST /repos/DFXswiss/app/statuses/${PREVIOUS_SHA}`);
+  assert.equal(posted[0].body.state, 'pending');
+  assert.equal(posted[0].body.description, 'pair re-evaluation pending');
+  assert.equal(fake.reruns().length, 1);
+  assert.equal(fake.reruns()[0].key, 'POST /repos/DFXswiss/app/actions/jobs/301/rerun');
+});
+
 test('a dispatch skips the previous companion after invalidating the current pair', async () => {
   const fake = new FakeGitHub({
     ...openPairWithLocalRuns(),

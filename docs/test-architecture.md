@@ -43,13 +43,14 @@ Measured on `develop` at `4e9544a9`, 2026-08-10, Node 20, with
 950 tests passing across 81 suites, 353 files instrumented.
 
 Read that number together with the coverage rule in `CONTRIBUTING.md`, section
-"Coverage": every file a pull request touches must reach 100 % on
-all four metrics. CI enforces this for the pairing Node suite, and lines and branches for the review-gate
-Python suite, but not for Jest. The rule is still mandatory: reviewers reject a pull request that leaves
-a touched file below 100 %, and no deviation from it can be declared or granted
-(`CONTRIBUTING.md`, section "Complete test coverage is mandatory"). With the repository at 18 %, that
-means touching a long-neglected file makes its whole coverage your obligation. Plan for it rather
-than discovering it in review.
+"Coverage": every file a pull request touches must reach 100 % on all four
+metrics. CI enforces 100 % lines, branches and functions for the pairing Node
+suite and lines and branches for the review-gate Python suite, but not for Jest.
+The rule is still mandatory: reviewers reject a pull request that leaves a
+touched file below 100 %, and no deviation from it can be declared or granted
+(`CONTRIBUTING.md`, section "Complete test coverage is mandatory"). With the
+repository at 18 %, that means touching a long-neglected file makes its whole
+coverage your obligation. Plan for it rather than discovering it in review.
 
 ### Handbook deep-link — `node --test scripts/handbook/deep-link.node-test.cjs`
 
