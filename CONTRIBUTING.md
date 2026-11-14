@@ -467,11 +467,12 @@ pull requests must target `develop`. Every **open** side's exact head must
 carry its own repository's complete A38 review state before any paired code
 runs; each repository is evaluated with its own pinned guard checkout and the
 guard identity from `.github/e2e-pairing/guard-identities.json`. The selected
-first-review comment must name exactly that head. A merged companion is
-resolved through its immutable merge commit, not through moving `develop`.
-The remaining open side is then re-resolved, re-reviewed and re-attested
-against the companion's merge commit. A companion closed without merge makes
-the pair invalid and the other open side receives a `failure` status.
+first-review comment must name exactly that head. A companion merged into
+`develop` is resolved through its immutable merge commit, not through moving
+`develop`. The remaining open side is then re-resolved, re-reviewed and
+re-attested against the companion's merge commit. A companion closed without
+merge, or merged into `main` or any other base, makes the pair invalid and the
+other open side receives a `failure` status.
 
 The one shared run happens in
 [`.github/workflows/e2e-paired.yml`](.github/workflows/e2e-paired.yml) on an

@@ -145,12 +145,13 @@ invalidates the old result. Review comments do not cancel a running shared run.
 A backend `repository_dispatch` takes the same invalidation path: its `before`
 head is a hint used to find the previous companion at that SHA. The coordinator
 cancels a run only after the re-resolved heads prove that a head of the pair
-moved. Merge order is free: a merged companion resolves through its immutable
-merge commit, and the remaining open side is then re-resolved, re-reviewed and
-re-attested. A companion closed without merge posts `failure` on the open
-companion. If both sides are merged, nothing is run. A green paired run proves
-that the exact app and backend heads started together against a real Postgres
-database and passed the full suite, including the route gate. It does not prove
+moved. Merge order is free for merges into `develop`: a merged companion
+resolves through its immutable merge commit, and the remaining open side is
+then re-resolved, re-reviewed and re-attested. A companion closed without
+merge or merged into another base posts `failure` on the open companion. If
+both sides are merged, nothing is run. A green paired run proves that the
+exact app and backend heads started together against a real Postgres database
+and passed the full suite, including the route gate. It does not prove
 external-provider behavior, money movement, the migration chain, or that the
 pull requests will merge without conflicts.
 The coordinator also reconciles every open paired pull request in both
