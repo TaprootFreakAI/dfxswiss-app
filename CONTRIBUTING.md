@@ -288,7 +288,10 @@ guard clauses and the state combinations a screen only reaches in production. If
 a line genuinely cannot be exercised, delete it rather than excluding it from the
 measurement.
 
-CI runs the suite without a coverage gate. The rule is still mandatory (see
+CI runs the Jest suite without a coverage gate; the pairing Node suite is
+enforced at 100 % lines, branches and functions, and the review-gate Python
+suite at 100 % lines and branches.
+The rule is still mandatory for every file (see
 [Complete test coverage is mandatory](#complete-test-coverage-is-mandatory)) and
 reviewers reject a pull request that leaves a touched file below 100 %: state
 the per-file numbers in the pull-request description and let the reviewer check
@@ -513,7 +516,7 @@ commit and is re-run and re-attested. If a side is closed without merging, the
 pair fails closed. A pair whose both sides are already merged is not run.
 The coordinator also reconciles every open paired pull request in both
 repositories every 30 minutes, on any base, and repairs divergent and stale
-pending statuses. It catches a retarget away from `develop`/`main` and any lost
+pending statuses. It catches a retarget away from `develop` and any lost
 notification. After an invalidation it also reruns the local required
 `Full-stack E2E` jobs, and it replaces a running marker whose shared run ended
 without a result with a terminal `failure`, then reruns those local jobs so a

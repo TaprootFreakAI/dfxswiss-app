@@ -207,6 +207,7 @@ jobs:
           MERGED: ${{ github.event.pull_request.merged == true }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          E2E_PAIR_APP_SLUG: ${{ vars.E2E_PAIR_APP_SLUG }}
         run: |
           set -euo pipefail
           if [ "${RUN_URL:-}" = '' ]; then
@@ -601,6 +602,11 @@ jobs:
           set -euo pipefail
           python -m venv .a38-venv-backend
           GIT_TERMINAL_PROMPT=0 .a38-venv-backend/bin/python -m pip install --quiet --disable-pip-version-check --no-input "git+https://github.com/DFXswiss/agent@${PIN}"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
 
       - name: Publish or supersede
         env:

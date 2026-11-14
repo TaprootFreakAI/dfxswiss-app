@@ -203,7 +203,7 @@ route gate. It does not prove external providers, money movement, the migration
 chain, or a future merge result.
 The coordinator also reconciles every open paired pull request in both
 repositories every 30 minutes, on any base, and repairs divergent and stale
-pending statuses. It catches a retarget away from `develop`/`main` and any lost
+pending statuses. It catches a retarget away from `develop` and any lost
 notification. After it invalidates a pair, it also reruns the local required
 `Full-stack E2E` jobs so branch protection cannot keep seeing their previous
 green result. A running marker whose shared run ended without a result is

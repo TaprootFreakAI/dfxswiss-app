@@ -431,6 +431,9 @@ export async function pairEvaluationSkipped(client, result, env) {
       return false;
     }
   }
+  if (String(runId) === String(env.GITHUB_RUN_ID)) {
+    return false;
+  }
   return runIsActive(client, env.GITHUB_REPOSITORY || APP_REPO, runId);
 }
 
@@ -785,9 +788,14 @@ async function invalidateOpenPair(client, result, env, { rerun = true } = {}) {
 
 // An error before a new status is posted must not leave an older App success
 // as the newest status. Best-effort cleanup reports what can still be proven
-// from fresh reads, then the original error is rethrown so the job fails.
+// from fresh reads. Without the App slug the cleanup cannot match its own
+// statuses; otherwise the original error is rethrown so the job fails.
 export async function failClosedAfterError(client, env, deps, startRepo, startPr, error) {
-  const creatorLogin = `${env.E2E_PAIR_APP_SLUG || ''}[bot]`;
+  const slug = env.E2E_PAIR_APP_SLUG || '';
+  if (!slug) {
+    throw new PairingError('pairing app slug unavailable');
+  }
+  const creatorLogin = `${slug}[bot]`;
   const reason = `pair could not be verified: ${error?.message || error}`;
   const heads = new Map();
   const collectHead = (repo, pull) => {
@@ -1124,8 +1132,6 @@ async function resolveValidatedCommand(client, env, deps, reviewGate, startRepo,
       // current open pair once. A proven active run was skipped above.
       await invalidateOpenPair(client, result, env);
       openPairInvalidated = true;
-    } else if (result.review_pending) {
-      rerunReviewPending = await hasAppStatusOnOpenSide(client, result, env);
     }
   }
   if (env.EVENT_NAME === 'pull_request_target' && env.EVENT_ACTION === 'closed' && result.valid) {
@@ -1143,6 +1149,9 @@ async function resolveValidatedCommand(client, env, deps, reviewGate, startRepo,
     await invalidateOpenPair(client, result, env);
     openPairInvalidated = result.paired === true;
     await invalidatePreviousCompanion(client, env, deps, startRepo, startPr, result);
+  }
+  if (result.review_pending && !openPairInvalidated) {
+    rerunReviewPending = await hasAppStatusOnOpenSide(client, result, env);
   }
   if (result.valid && attestableSides(result).length === 0) {
     result.valid = false;
@@ -1212,7 +1221,7 @@ async function invalidateCommand(client, env, deps) {
     if (boolValue(env.MERGED)) {
       otherRepository(startRepo);
       const mergedPull = await getPullOrNull(client, startRepo, startPr);
-      if (mergedPull && (mergedPull.base?.ref === 'develop' || mergedPull.base?.ref === 'main')) {
+      if (mergedPull && mergedPull.base?.ref === 'develop') {
         deps.log('closed companion merged: no invalidation');
         return 0;
       }
@@ -1374,6 +1383,24 @@ async function reconcilePull(client, env, deps, slug, repo, pr, reviewGate, hand
     }
     const companion = await companionStatusAgrees(client, result, repo, newest, creatorLogin);
     if (!companion.agrees) {
+      if (isRunningMarker(companion.newest)) {
+        const running = parseRunningDescription(companion.newest.description);
+        if (await runIsActive(client, env.GITHUB_REPOSITORY || APP_REPO, running.run_id)) {
+          deps.log(`reconcile ${repositoryLabel(repo)}#${pr}: companion paired run is still active, no status change`);
+          return false;
+        }
+        markHandled();
+        await postOnOpenSides(client, result, {
+          state: 'failure',
+          description: 'paired run ended without a result',
+          targetUrl: statusTargetUrl(env),
+        });
+        await rerunOpenSides(client, result);
+        deps.log(
+          `reconcile ${repositoryLabel(repo)}#${pr}: companion paired run ended without a result, reran local jobs`,
+        );
+        return true;
+      }
       markHandled();
       if (isStaleNonRunningPending(companion.newest, deps.now)) {
         await failStalePendingEvaluation(client, result, env, deps, `${repositoryLabel(repo)}#${pr}`);

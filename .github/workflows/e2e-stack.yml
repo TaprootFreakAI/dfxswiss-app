@@ -98,6 +98,7 @@ jobs:
           CALLED: ${{ inputs.called }}
           BASE: ${{ github.base_ref || inputs.base_ref }}
           EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           FULL: ${{ inputs.full }}
           PR_NUMBER: ${{ inputs.pr_number }}
           HAS_API_KEY: ${{ secrets.E2E_API_CHECKOUT_KEY != '' }}
@@ -169,6 +170,18 @@ jobs:
               fi
             fi
             if [ "$paired" = 'true' ]; then
+              HEAD_SHA="${EVENT_HEAD_SHA:-}"
+              if [ -z "$HEAD_SHA" ]; then
+                if ! HEAD_SHA="$(gh api "repos/DFXswiss/app/pulls/${PR_NUMBER}" --jq '.head.sha')"; then
+                  echo '::error::could not read the pull request head commit.'
+                  exit 1
+                fi
+              fi
+              if ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+                echo '::error::could not read the pull request head commit.'
+                exit 1
+              fi
+              echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
               echo 'Paired run: e2e-companion.json is active on a develop PR; waiting for the shared attestation.'
               echo "mode=paired-attested" >> "$GITHUB_OUTPUT"
               exit 0
@@ -242,11 +255,17 @@ jobs:
           path: trusted-e2e-pairing
           persist-credentials: false
 
+      - name: Set up Node.js for attestation
+        if: steps.scope.outputs.mode == 'paired-attested'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+
       - name: Verify paired attestation
         if: steps.scope.outputs.mode == 'paired-attested'
         env:
           APP_PR: ${{ inputs.pr_number }}
-          APP_SHA: ${{ github.event.pull_request.head.sha || '' }}
+          APP_SHA: ${{ steps.scope.outputs.head_sha }}
           E2E_PAIR_APP_SLUG: ${{ vars.E2E_PAIR_APP_SLUG }}
           GH_TOKEN: ${{ github.token }}
         run: node trusted-e2e-pairing/.github/e2e-pairing/cli.mjs verify-attestation

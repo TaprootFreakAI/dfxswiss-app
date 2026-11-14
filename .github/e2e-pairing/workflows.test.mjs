@@ -98,6 +98,33 @@ test('pairing unit tests enforce full coverage in PR CI', () => {
   assert.match(runStep, /--test-coverage-include='\.github\/e2e-pairing\/\*\.mjs'/);
   assert.match(runStep, /--test-coverage-exclude='\.github\/e2e-pairing\/\*\.test\.mjs'/);
   assert.match(runStep, /"\.github\/e2e-pairing\/\*\.test\.mjs"/);
+  const pythonStep = step(workflow, 'Run review-gate unit tests');
+  assert.match(pythonStep, /python3 -m coverage run --branch/);
+  assert.match(pythonStep, /--include='\.github\/e2e-pairing\/review-gate\.py'/);
+  assert.match(pythonStep, /coverage report -m --fail-under=100/);
+});
+
+test('node steps in paired and stack workflows set up Node 24 first', () => {
+  const paired = read('.github/workflows/e2e-paired.yml');
+  const publishJob = job(paired, 'publish');
+  const publishSetup = publishJob.indexOf('      - name: Set up Node.js\n');
+  const publishStep = publishJob.indexOf('      - name: Publish or supersede\n');
+  assert.ok(publishSetup >= 0, 'publish sets up Node.js');
+  assert.ok(publishSetup < publishStep, 'publish sets up Node.js before running the CLI');
+  const publishSetupStep = step(publishJob, 'Set up Node.js');
+  assert.match(publishSetupStep, /uses: actions\/setup-node@v4/);
+  assert.match(publishSetupStep, /node-version: '24\.x'/);
+  assert.doesNotMatch(publishSetupStep, /cache:/);
+
+  const stack = read('.github/workflows/e2e-stack.yml');
+  const stackSetup = stack.indexOf('      - name: Set up Node.js for attestation\n');
+  const verify = stack.indexOf('      - name: Verify paired attestation\n');
+  assert.ok(stackSetup >= 0, 'stack sets up Node.js for the attestation');
+  assert.ok(stackSetup < verify, 'stack sets up Node.js before verifying the attestation');
+  const stackSetupStep = step(stack, 'Set up Node.js for attestation');
+  assert.match(stackSetupStep, /if: steps\.scope\.outputs\.mode == 'paired-attested'/);
+  assert.match(stackSetupStep, /uses: actions\/setup-node@v4/);
+  assert.match(stackSetupStep, /node-version: '24\.x'/);
 });
 
 test('stack scope only enters paired mode for a develop pull request', () => {
@@ -135,10 +162,22 @@ test('the local verifier is checked out at the pull request base commit', () => 
   assert.match(scope, /if \[ -z "\$\{BASE:-\}" \] \|\| \[ -z "\$\{BASE_SHA\}" \]; then/);
   assert.match(scope, /--jq '\[\.base\.ref, \.base\.sha\] \| @tsv'/);
   assert.match(scope, /echo "base_sha=\$BASE_SHA" >> "\$GITHUB_OUTPUT"/);
+  assert.match(scope, /EVENT_HEAD_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
+  assert.match(scope, /HEAD_SHA="\$\{EVENT_HEAD_SHA:-\}"/);
+  assert.match(scope, /gh api "repos\/DFXswiss\/app\/pulls\/\$\{PR_NUMBER\}" --jq '\.head\.sha'/);
+  assert.match(scope, /echo "head_sha=\$HEAD_SHA" >> "\$GITHUB_OUTPUT"/);
   const checkout = step(workflow, 'Check out trusted pairing tooling');
   assert.match(checkout, /repository: DFXswiss\/app/);
   assert.match(checkout, /ref: \$\{\{ steps\.scope\.outputs\.base_sha \}\}/);
   assert.doesNotMatch(checkout, /ref: develop/);
+  const verify = step(workflow, 'Verify paired attestation');
+  assert.match(verify, /APP_SHA: \$\{\{ steps\.scope\.outputs\.head_sha \}\}/);
+});
+
+test('the invalidation step receives the pairing App slug', () => {
+  const workflow = read('.github/workflows/e2e-paired.yml');
+  const invalidate = step(workflow, 'Invalidate stale attestations');
+  assert.match(invalidate, /E2E_PAIR_APP_SLUG: \$\{\{ vars\.E2E_PAIR_APP_SLUG \}\}/);
 });
 
 test('privileged paired jobs check out the immutable workflow commit', () => {

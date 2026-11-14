@@ -44,7 +44,7 @@ Reject the pull request when any of these is true:
   a failure.
   The coordinator also reconciles every open paired pull request in both
   repositories every 30 minutes, on any base, and repairs divergent and stale
-  pending statuses. It catches a retarget away from `develop`/`main` and any
+  pending statuses. It catches a retarget away from `develop` and any
   lost notification.
 - The test offered as coverage of the function replaces the screen, the
   visitor's action, the session, the router, the navigation, this service's

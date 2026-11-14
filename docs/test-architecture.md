@@ -44,8 +44,9 @@ Measured on `develop` at `4e9544a9`, 2026-08-10, Node 20, with
 
 Read that number together with the coverage rule in `CONTRIBUTING.md`, section
 "Coverage": every file a pull request touches must reach 100 % on
-all four metrics, and CI does not enforce it. The rule is still mandatory: reviewers reject a pull
-request that leaves a touched file below 100 %, and no deviation from it can be declared or granted
+all four metrics. CI enforces this for the pairing Node suite, and lines and branches for the review-gate
+Python suite, but not for Jest. The rule is still mandatory: reviewers reject a pull request that leaves
+a touched file below 100 %, and no deviation from it can be declared or granted
 (`CONTRIBUTING.md`, section "Complete test coverage is mandatory"). With the repository at 18 %, that
 means touching a long-neglected file makes its whole coverage your obligation. Plan for it rather
 than discovering it in review.
@@ -154,7 +155,7 @@ external-provider behavior, money movement, the migration chain, or that the
 pull requests will merge without conflicts.
 The coordinator also reconciles every open paired pull request in both
 repositories every 30 minutes, on any base, and repairs divergent and stale
-pending statuses. It catches a retarget away from `develop`/`main` and any lost
+pending statuses. It catches a retarget away from `develop` and any lost
 notification. After an invalidation it also reruns the local required
 `Full-stack E2E` jobs, and it replaces a running marker whose shared run ended
 without a result with a terminal `failure`, then reruns those local jobs so a

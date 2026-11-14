@@ -74,8 +74,11 @@ jobs:
       - name: Run pairing unit tests
         run: node --test --experimental-test-coverage --test-coverage-lines=100 --test-coverage-branches=100 --test-coverage-functions=100 --test-coverage-include='.github/e2e-pairing/*.mjs' --test-coverage-exclude='.github/e2e-pairing/*.test.mjs' ".github/e2e-pairing/*.test.mjs"
 
+      - name: Install Python coverage
+        run: python3 -m pip install --user 'coverage==7.10.7'
+
       - name: Run review-gate unit tests
-        run: python3 -m unittest discover -s .github/e2e-pairing -p 'test_*.py'
+        run: python3 -m coverage run --branch --include='.github/e2e-pairing/review-gate.py' -m unittest discover -s .github/e2e-pairing -p 'test_*.py' && python3 -m coverage report -m --fail-under=100
 
       - name: Run linter
         run: npm run lint
