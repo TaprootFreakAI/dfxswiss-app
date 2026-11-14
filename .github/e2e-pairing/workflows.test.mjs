@@ -58,8 +58,10 @@ function step(workflow, name) {
   const start = workflow.indexOf(`      - name: ${name}\n`);
   assert.notEqual(start, -1, `step ${name} is present`);
   const lines = workflow.slice(start + 1).split('\n');
-  const next = lines.findIndex((line) => /^      - name: /.test(line));
-  assert.notEqual(next, -1, `step ${name} has a following step`);
+  const next = lines.findIndex(
+    (line, index) => index > 0 && (/^      - name: /.test(line) || /^  [a-z][a-z0-9-]*:$/.test(line)),
+  );
+  assert.notEqual(next, -1, `step ${name} has a following step or job`);
   return lines.slice(0, next).join('\n');
 }
 
@@ -106,6 +108,25 @@ test('pairing unit tests enforce full coverage in PR CI', () => {
 
 test('node steps in paired and stack workflows set up Node 24 first', () => {
   const paired = read('.github/workflows/e2e-paired.yml');
+  const jobs = paired
+    .split('\n')
+    .map((line) => /^  ([a-z][a-z0-9-]*):$/.exec(line)?.[1])
+    .filter(Boolean);
+  for (const name of jobs) {
+    const jobText = job(paired, name);
+    const setup = jobText.indexOf('      - name: Set up Node.js\n');
+    const cliRuns = [...jobText.matchAll(/^\s*(?:run:\s*)?node\b[^\n]*cli\.mjs/gm)].map((match) => match.index);
+    if (cliRuns.length === 0) {
+      continue;
+    }
+    assert.ok(setup >= 0, `${name} sets up Node.js`);
+    assert.ok(setup < cliRuns[0], `${name} sets up Node.js before running the CLI`);
+    const setupStep = step(jobText, 'Set up Node.js');
+    assert.match(setupStep, /uses: actions\/setup-node@v4/, `${name} uses setup-node v4`);
+    assert.match(setupStep, /node-version: '24\.x'/, `${name} uses Node 24.x`);
+    assert.doesNotMatch(setupStep, /cache:/, `${name} setup has no cache`);
+  }
+
   const publishJob = job(paired, 'publish');
   const publishSetup = publishJob.indexOf('      - name: Set up Node.js\n');
   const publishStep = publishJob.indexOf('      - name: Publish or supersede\n');
@@ -125,6 +146,32 @@ test('node steps in paired and stack workflows set up Node 24 first', () => {
   assert.match(stackSetupStep, /if: steps\.scope\.outputs\.mode == 'paired-attested'/);
   assert.match(stackSetupStep, /uses: actions\/setup-node@v4/);
   assert.match(stackSetupStep, /node-version: '24\.x'/);
+});
+
+test('the resolve job fails closed after an earlier step failed', () => {
+  const workflow = read('.github/workflows/e2e-paired.yml');
+  const resolve = job(workflow, 'resolve');
+  const cleanup = step(workflow, 'Fail closed after an earlier step failed');
+  assert.match(
+    cleanup,
+    /if: failure\(\) && steps\.app-token\.outcome == 'success' && steps\.side\.outputs\.start_pr != '' && steps\.resolve\.outcome != 'failure' && steps\.invalidate\.outcome != 'failure'/,
+  );
+  assert.match(cleanup, /START_REPO: \$\{\{ steps\.side\.outputs\.start_repo \}\}/);
+  assert.match(cleanup, /START_PR: \$\{\{ steps\.side\.outputs\.start_pr \}\}/);
+  assert.match(cleanup, /E2E_PAIR_APP_SLUG: \$\{\{ vars\.E2E_PAIR_APP_SLUG \}\}/);
+  assert.match(cleanup, /GH_TOKEN: \$\{\{ steps\.app-token\.outputs\.token \}\}/);
+  assert.match(
+    cleanup,
+    /RUN_URL: \$\{\{ github\.server_url \}\}\/\$\{\{ github\.repository \}\}\/actions\/runs\/\$\{\{ github\.run_id \}\}/,
+  );
+  assert.match(cleanup, /run: node trusted-e2e-pairing\/\.github\/e2e-pairing\/cli\.mjs fail-closed/);
+  assert.match(step(workflow, 'Invalidate stale attestations'), /id: invalidate/);
+  assert.match(step(workflow, 'Resolve pair and review gates'), /id: resolve/);
+  const cleanupOffset = workflow.indexOf('      - name: Fail closed after an earlier step failed\n');
+  const resolveOffset = workflow.indexOf('      - name: Resolve pair and review gates\n');
+  assert.ok(cleanupOffset > resolveOffset, 'fail-closed cleanup follows the resolve step');
+  assert.ok(resolve.indexOf(cleanup) > 0, 'fail-closed cleanup belongs to the resolve job');
+  assert.ok(resolve.trimEnd().endsWith(cleanup.trimEnd()), 'fail-closed cleanup is the last resolve step');
 });
 
 test('stack scope only enters paired mode for a develop pull request', () => {
@@ -239,7 +286,7 @@ test('a schedule reconciles paired pull requests without running the paired stac
   assert.match(reconcile, /timeout-minutes: 130/);
   assert.match(reconcile, /ref: \$\{\{ github\.workflow_sha \}\}/);
   assert.match(reconcile, /uses: actions\/setup-node@v4/);
-  assert.match(reconcile, /node-version: '24'/);
+  assert.match(reconcile, /node-version: '24\.x'/);
   assert.match(reconcile, /private-key: \$\{\{ secrets\.E2E_PAIR_APP_PRIVATE_KEY \}\}/);
   assert.match(reconcile, /repositories: app,backend/);
   assert.match(reconcile, /cli\.mjs reconcile/);

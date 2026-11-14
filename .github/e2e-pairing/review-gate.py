@@ -111,34 +111,31 @@ def _selected_review_head_reasons(api, repo: str, head: str, snap, comments) -> 
 
 
 def evaluate(repo: str, number: int, head: str, token: str, guard_login: str) -> tuple[bool, list[str]]:
-    try:
-        base_api = GitHubApi(token)
-        api = GuardIdentityApi(base_api, guard_login)
-        snap = a38_guard.fetch_pull(api, repo, number)
-        if snap.state != "open":
-            return False, ["pull request is not open"]
-        if snap.head_sha != head:
-            return False, ["pull request head changed"]
-        trusted = a38_guard.resolve_trusted_guard_config(api, snap)
-        comments = a38_guard.collect_comments(api, repo, number)
-        ok, reasons = a38_review.evaluate_review_gate(
-            api,
-            repo=repo,
-            number=number,
-            head=head,
-            base_sha=snap.base_sha,
-            author_id=snap.author_id,
-            comments=comments,
-            markdown_only=False,
-            one_review_author=one_review_for(trusted.config, snap.author_login),
-        )
-        if ok:
-            exact_reasons = _selected_review_head_reasons(api, repo, head, snap, comments)
-            if exact_reasons:
-                return False, exact_reasons
-        return ok, reasons
-    except Exception as exc:  # noqa: BLE001 - unreadable review state must fail closed
-        return False, [f"review gate error: {exc}"]
+    base_api = GitHubApi(token)
+    api = GuardIdentityApi(base_api, guard_login)
+    snap = a38_guard.fetch_pull(api, repo, number)
+    if snap.state != "open":
+        return False, ["pull request is not open"]
+    if snap.head_sha != head:
+        return False, ["pull request head changed"]
+    trusted = a38_guard.resolve_trusted_guard_config(api, snap)
+    comments = a38_guard.collect_comments(api, repo, number)
+    ok, reasons = a38_review.evaluate_review_gate(
+        api,
+        repo=repo,
+        number=number,
+        head=head,
+        base_sha=snap.base_sha,
+        author_id=snap.author_id,
+        comments=comments,
+        markdown_only=False,
+        one_review_author=one_review_for(trusted.config, snap.author_login),
+    )
+    if ok:
+        exact_reasons = _selected_review_head_reasons(api, repo, head, snap, comments)
+        if exact_reasons:
+            return False, exact_reasons
+    return ok, reasons
 
 
 def main(argv=None) -> int:
@@ -147,6 +144,7 @@ def main(argv=None) -> int:
     parser.add_argument("--pr", required=True, type=int)
     parser.add_argument("--head", required=True)
     args = parser.parse_args(argv)
+    error = False
     try:
         token = os.environ.get("GH_TOKEN", "")
         if not token:
@@ -154,7 +152,11 @@ def main(argv=None) -> int:
         ok, reasons = evaluate(args.repo, args.pr, args.head, token, guard_login_for(args.repo))
     except Exception as exc:  # noqa: BLE001 - every gate failure must be a closed verdict
         ok, reasons = False, [f"review gate error: {exc}"]
-    print(json.dumps({"ok": bool(ok), "reasons": [str(reason) for reason in reasons]}, separators=(",", ":")))
+        error = True
+    verdict = {"ok": bool(ok), "reasons": [str(reason) for reason in reasons]}
+    if error:
+        verdict = {"ok": False, "error": True, "reasons": verdict["reasons"]}
+    print(json.dumps(verdict, separators=(",", ":")))
     return 0
 
 

@@ -741,6 +741,12 @@ export function defaultReviewGate({ spawn = spawnSync, env = process.env } = {})
     if (!verdict || typeof verdict.ok !== 'boolean' || !Array.isArray(verdict.reasons)) {
       throw new PairingError('review gate verdict is invalid');
     }
+    if (verdict.error !== undefined && typeof verdict.error !== 'boolean') {
+      throw new PairingError('review gate verdict is invalid');
+    }
+    if (verdict.error === true) {
+      throw new PairingError(`review gate error: ${verdict.reasons.join('; ')}`);
+    }
     return { ok: verdict.ok, reasons: verdict.reasons.map(String) };
   };
 }
@@ -1105,6 +1111,20 @@ async function resolveCommand(client, env, deps, reviewGate) {
   }
 }
 
+async function failClosedCommand(client, env, deps) {
+  const startRepo = env.START_REPO;
+  const startPr = requirePositiveInteger(env.START_PR, 'START_PR');
+  otherRepository(startRepo);
+  return failClosedAfterError(
+    client,
+    env,
+    deps,
+    startRepo,
+    startPr,
+    new PairingError('resolve job failed before the pair was evaluated'),
+  );
+}
+
 async function resolveValidatedCommand(client, env, deps, reviewGate, startRepo, startPr) {
   let result = await resolvePair({ client, startRepo, startPr, reviewGate });
   let closedCompanionFailed = false;
@@ -1217,31 +1237,30 @@ async function publishCommand(client, env, deps, reviewGate) {
 async function invalidateCommand(client, env, deps) {
   const startRepo = env.START_REPO;
   const startPr = requirePositiveInteger(env.START_PR, 'START_PR');
-  if (boolValue(env.CLOSED)) {
-    if (boolValue(env.MERGED)) {
-      otherRepository(startRepo);
-      const mergedPull = await getPullOrNull(client, startRepo, startPr);
-      if (mergedPull && mergedPull.base?.ref === 'develop') {
-        deps.log('closed companion merged: no invalidation');
+  try {
+    if (boolValue(env.CLOSED)) {
+      if (boolValue(env.MERGED)) {
+        otherRepository(startRepo);
+        const mergedPull = await getPullOrNull(client, startRepo, startPr);
+        if (mergedPull && mergedPull.base?.ref === 'develop') {
+          deps.log('closed companion merged: no invalidation');
+          return 0;
+        }
+        await failOpenCompanion(client, env, deps, startRepo, startPr, { allowMergedElsewhere: true });
         return 0;
       }
-      await failOpenCompanion(client, env, deps, startRepo, startPr, { allowMergedElsewhere: true });
+      otherRepository(startRepo);
+      await failOpenCompanion(client, env, deps, startRepo, startPr);
       return 0;
     }
-    otherRepository(startRepo);
-    await failOpenCompanion(client, env, deps, startRepo, startPr);
-    return 0;
-  }
 
-  let current = null;
-  try {
-    current = await inspectPair({ client, startRepo, startPr });
+    const current = await inspectPair({ client, startRepo, startPr });
+    await invalidateOpenPair(client, current, env);
+    await invalidatePreviousCompanion(client, env, deps, startRepo, startPr, current);
+    return 0;
   } catch (error) {
     return failClosedAfterError(client, env, deps, startRepo, startPr, error);
   }
-  await invalidateOpenPair(client, current, env);
-  await invalidatePreviousCompanion(client, env, deps, startRepo, startPr, current);
-  return 0;
 }
 
 async function newestHeadStatus(client, repo, sha, creatorLogin) {
@@ -1300,6 +1319,16 @@ async function failStalePendingEvaluation(client, result, env, deps, label) {
   });
   await rerunOpenSides(client, result);
   deps.log(`reconcile ${label}: pending evaluation was stale, failed it and reran local jobs`);
+}
+
+async function everyOtherOpenHeadIsReviewPending(client, result, repo, creatorLogin) {
+  for (const otherHead of openSides(result).filter((side) => side.repo !== repo)) {
+    const otherNewest = await newestHeadStatus(client, otherHead.repo, otherHead.sha, creatorLogin);
+    if (!otherNewest || !isReviewGatePendingStatus(otherNewest)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // A scheduled sweep only repairs statuses that a lost notification left behind.
@@ -1413,15 +1442,12 @@ async function reconcilePull(client, env, deps, slug, repo, pr, reviewGate, hand
     deps.log(`reconcile ${repositoryLabel(repo)}#${pr}: pair is valid, no status change`);
     return false;
   }
-  const companion =
-    result.review_pending && statusMatchesPair(newest, result)
-      ? await companionStatusAgrees(client, result, repo, newest, creatorLogin)
-      : { agrees: true, newest: null };
-  if (
+  const reviewGateStillPending =
     result.review_pending &&
-    ((isStalePending && isReviewGatePendingStatus(newest)) ||
-      (isStaleNonRunningPending(companion.newest, deps.now) && isReviewGatePendingStatus(companion.newest)))
-  ) {
+    isStalePending &&
+    isReviewGatePendingStatus(newest) &&
+    (await everyOtherOpenHeadIsReviewPending(client, result, repo, creatorLogin));
+  if (reviewGateStillPending) {
     deps.log(`reconcile ${repositoryLabel(repo)}#${pr}: review gate is still not satisfied, left pending marker unchanged`);
     return false;
   }
@@ -1538,6 +1564,8 @@ function commandHandler(command, client, env, deps) {
       return publishCommand(client, env, deps, reviewGate);
     case 'invalidate':
       return invalidateCommand(client, env, deps);
+    case 'fail-closed':
+      return failClosedCommand(client, env, deps);
     case 'reconcile':
       return reconcileCommand(client, env, deps, reviewGate);
     case 'verify-attestation':

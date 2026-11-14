@@ -45,7 +45,11 @@ Reject the pull request when any of these is true:
   The coordinator also reconciles every open paired pull request in both
   repositories every 30 minutes, on any base, and repairs divergent and stale
   pending statuses. It catches a retarget away from `develop` and any
-  lost notification.
+  lost notification. A stale review-gate pending stays only when every open head
+  carries it; otherwise reconcile invalidates and reruns both local jobs. A
+  close-path inspection error and an internal review-gate error are failures,
+  never review-pending verdicts, and the resolve job fails closed before the CLI
+  runs, after setting up Node 24.
 - The test offered as coverage of the function replaces the screen, the
   visitor's action, the session, the router, the navigation, this service's
   API, or this service's database.

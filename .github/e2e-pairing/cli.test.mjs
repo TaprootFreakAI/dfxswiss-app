@@ -355,6 +355,7 @@ test('truncation propagates from companion checks and previous-companion invalid
   const closedApp = appPull(12, { state: 'closed', merged: false, changedFiles: 2 });
   const closed = new FakeGitHub({
     ...validPairRoutes({ app: closedApp }),
+    ...appStatuses(APP_SHA, []),
     'GET /repos/DFXswiss/app/pulls/12/files?per_page=100': [{ filename: 'e2e-companion.json', status: 'modified' }],
   });
   const { deps: closedDeps } = deps(closed);
@@ -365,6 +366,7 @@ test('truncation propagates from companion checks and previous-companion invalid
 
   const openCompanion = new FakeGitHub({
     ...validPairRoutes({ app: appPull(12, { state: 'closed', merged: false }) }),
+    ...appStatuses(APP_SHA, []),
     [`GET /repos/DFXswiss/app/contents/e2e-companion.json?ref=${APP_SHA}`]: content(companion(BACKEND_REPO, 35)),
     'GET /repos/DFXswiss/backend/pulls/35': backendPull(35, { changedFiles: 2 }),
     'GET /repos/DFXswiss/backend/pulls/35/files?per_page=100': [{ filename: 'e2e-companion.json', status: 'modified' }],
@@ -381,6 +383,7 @@ test('truncation propagates from companion checks and previous-companion invalid
 
   const previous = new FakeGitHub({
     ...openPairWithLocalRuns(),
+    ...appStatuses(APP_SHA, []),
     'GET /repos/DFXswiss/backend/pulls/35': backendPull(35, { sha: PREVIOUS_BACKEND_SHA, changedFiles: 2 }),
     'GET /repos/DFXswiss/backend/pulls/35/files?per_page=100': [{ filename: 'e2e-companion.json', status: 'modified' }],
     [`GET /repos/DFXswiss/app/contents/e2e-companion.json?ref=${PREVIOUS_SHA}`]: content(companion(BACKEND_REPO, 35)),
@@ -502,6 +505,50 @@ test('invalidate fails closed on an inspection error and reports the open attest
     fake.reruns().some((call) => call.key === 'POST /repos/DFXswiss/app/actions/jobs/101/rerun'),
     true,
   );
+});
+
+test('invalidate on close fails closed when a post-inspection read fails', async () => {
+  const closedApp = appPull(12, { state: 'closed', merged: false });
+  const fake = new FakeGitHub({
+    ...validPairRoutes({ app: closedApp }),
+    'GET /repos/DFXswiss/backend/pulls/34/files?per_page=100': [{ filename: 'e2e-companion.json', status: 'modified' }],
+    ...appStatuses(APP_SHA, [status({ description: pairDescription() })]),
+    ...backendStatuses(BACKEND_SHA, [status({ description: pairDescription() })]),
+    ...localRunRoutes({
+      repo: BACKEND_REPO,
+      sha: BACKEND_SHA,
+      runId: 20,
+      jobId: 201,
+      path: '.github/workflows/api-pr.yaml',
+    }),
+    [`POST /repos/DFXswiss/backend/statuses/${BACKEND_SHA}`]: { id: 1 },
+  });
+  const { deps: injected, errors } = deps(fake);
+  const fetch = async (url, options = {}) => {
+    const key = FakeGitHub.key(url, options.method || 'GET');
+    if (key === 'GET /repos/DFXswiss/backend/pulls/34/files?per_page=100') {
+      throw new Error('companion files unavailable');
+    }
+    return fake.fetch(url, options);
+  };
+  assert.equal(
+    await main(['invalidate'], {
+      ...injected,
+      fetch,
+      env: { ...injected.env, START_REPO: APP_REPO, START_PR: '12', CLOSED: 'true', MERGED: 'false', RUN_URL },
+    }),
+    1,
+  );
+  const posted = fake.statusPosts();
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].key, `POST /repos/DFXswiss/backend/statuses/${BACKEND_SHA}`);
+  assert.equal(posted[0].body.state, 'failure');
+  assert.match(posted[0].body.description, /companion files unavailable/);
+  assert.deepEqual(
+    fake.reruns().map((call) => call.key),
+    ['POST /repos/DFXswiss/backend/actions/jobs/201/rerun'],
+  );
+  assert.match(errors.at(-1), /companion files unavailable/);
 });
 
 test('the fail-closed helper still rethrows the original error when its own lookup fails', async () => {
@@ -750,6 +797,60 @@ test('the fail-closed helper collects only heads with an actionable App status',
     assert.equal(fake.statusPosts().length, postedCount, name);
     assert.match(errors.at(-1), /truncated/, name);
   }
+});
+
+test('fail-closed fails open attested heads and rejects an invalid start', async () => {
+  const fake = new FakeGitHub({
+    ...openPairWithLocalRuns(),
+    ...appStatuses(APP_SHA, [status({ description: pairDescription() })]),
+    ...backendStatuses(BACKEND_SHA, [status({ description: pairDescription() })]),
+    [`POST /repos/DFXswiss/app/statuses/${APP_SHA}`]: { id: 1 },
+    [`POST /repos/DFXswiss/backend/statuses/${BACKEND_SHA}`]: { id: 2 },
+  });
+  const { deps: injected, errors } = deps(fake);
+  assert.equal(
+    await main(['fail-closed'], {
+      ...injected,
+      env: { ...injected.env, START_REPO: APP_REPO, START_PR: '12', RUN_URL },
+    }),
+    1,
+  );
+  const posted = fake.statusPosts();
+  assert.equal(posted.length, 2);
+  assert.equal(posted.every((post) => post.body.state === 'failure'), true);
+  assert.equal(
+    posted.every((post) => /resolve job failed before the pair was evaluated/.test(post.body.description)),
+    true,
+  );
+  assert.deepEqual(
+    fake.reruns().map((call) => call.key).sort(),
+    [
+      'POST /repos/DFXswiss/app/actions/jobs/101/rerun',
+      'POST /repos/DFXswiss/backend/actions/jobs/201/rerun',
+    ],
+  );
+  assert.match(errors.at(-1), /resolve job failed before the pair was evaluated/);
+
+  const invalid = new FakeGitHub();
+  const { deps: invalidDeps, errors: invalidErrors } = deps(invalid);
+  assert.equal(
+    await main(['fail-closed'], {
+      ...invalidDeps,
+      env: { ...invalidDeps.env, START_REPO: APP_REPO, START_PR: '0', RUN_URL },
+    }),
+    1,
+  );
+  assert.match(invalidErrors.at(-1), /START_PR is not a positive integer/);
+  assert.equal(invalid.statusPosts().length, 0);
+  assert.equal(
+    await main(['fail-closed'], {
+      ...invalidDeps,
+      env: { ...invalidDeps.env, START_REPO: 'other/repo', START_PR: '12', RUN_URL },
+    }),
+    1,
+  );
+  assert.match(invalidErrors.at(-1), /unsupported repository other\/repo/);
+  assert.equal(invalid.statusPosts().length, 0);
 });
 
 test('a closed non-develop start still fails its mutual open companion', async () => {
@@ -1211,6 +1312,52 @@ test('a throwing review gate posts failure on every open head and reruns both lo
       'POST /repos/DFXswiss/app/actions/jobs/101/rerun',
       'POST /repos/DFXswiss/backend/actions/jobs/201/rerun',
     ],
+  );
+});
+
+test('an internal review-gate error posts failure and reruns both local jobs', async () => {
+  const fake = new FakeGitHub({
+    ...openPairWithLocalRuns(),
+    [`POST /repos/DFXswiss/app/statuses/${APP_SHA}`]: { id: 1 },
+    [`POST /repos/DFXswiss/backend/statuses/${BACKEND_SHA}`]: { id: 2 },
+  });
+  const reviewGate = defaultReviewGate({
+    env: { GH_TOKEN: 'token', REVIEW_GATE_PYTHON: 'python' },
+    spawn: () => ({ status: 0, stdout: '{"ok":false,"error":true,"reasons":["review gate error: boom"]}' }),
+  });
+  const { deps: injected, writes } = deps(fake, { reviewGate });
+  assert.equal(await main(['resolve'], { ...injected, env: { ...injected.env, ...resolveEnv() } }), 0);
+  assert.equal(writes[0][0].review_pending, 'false');
+  assert.match(writes[0][0].reason, /review gate error: review gate error: boom/);
+  const posted = fake.statusPosts();
+  assert.equal(posted.length, 2);
+  assert.equal(posted.every((post) => post.body.state === 'failure'), true);
+  assert.deepEqual(
+    fake.reruns().map((call) => call.key).sort(),
+    [
+      'POST /repos/DFXswiss/app/actions/jobs/101/rerun',
+      'POST /repos/DFXswiss/backend/actions/jobs/201/rerun',
+    ],
+  );
+});
+
+test('defaultReviewGate rejects internal errors and invalid error flags', () => {
+  const env = { GH_TOKEN: 'token', REVIEW_GATE_PYTHON: 'python' };
+  assert.throws(
+    () =>
+      defaultReviewGate({
+        env,
+        spawn: () => ({ status: 0, stdout: '{"ok":false,"error":true,"reasons":["gate offline"]}' }),
+      })({ repo: APP_REPO, pr: 12, head: APP_SHA }),
+    /review gate error: gate offline/,
+  );
+  assert.throws(
+    () =>
+      defaultReviewGate({
+        env,
+        spawn: () => ({ status: 0, stdout: '{"ok":false,"error":"true","reasons":["gate offline"]}' }),
+      })({ repo: APP_REPO, pr: 12, head: APP_SHA }),
+    /review gate verdict is invalid/,
   );
 });
 
@@ -2770,6 +2917,7 @@ test('invalidate on close rejects a missing target URL', async () => {
   const closedApp = appPull(12, { state: 'closed', merged: false });
   const fake = new FakeGitHub({
     ...validPairRoutes({ app: closedApp }),
+    ...appStatuses(APP_SHA, []),
     [`GET /repos/DFXswiss/app/contents/e2e-companion.json?ref=${APP_SHA}`]: content(companion(BACKEND_REPO, 34)),
   });
   const { deps: injected, errors } = deps(fake);
@@ -2820,6 +2968,7 @@ test('invalidate on a push skips current invalidation for an unpaired result', a
 test('invalidate on a push tolerates an unreadable previous companion file', async () => {
   const fake = new FakeGitHub({
     ...validPairRoutes(),
+    ...appStatuses(APP_SHA, []),
     [`GET /repos/DFXswiss/app/contents/e2e-companion.json?ref=${PREVIOUS_SHA}`]: new Error('offline'),
     [`POST /repos/DFXswiss/app/statuses/${APP_SHA}`]: { id: 1 },
     [`POST /repos/DFXswiss/backend/statuses/${BACKEND_SHA}`]: { id: 2 },
@@ -3509,6 +3658,11 @@ test('defaultReviewGate maps spawn output and errors to verdicts', () => {
     [{ status: 0, stdout: '{"ok":true}' }, /verdict is invalid/],
     [{ status: 0, stdout: '{"ok":true,"reasons":[]}' }, null],
     [{ status: 2 }, /exited 2:/],
+    [{ status: 0, stdout: '{"ok":false,"error":"yes","reasons":[]}' }, /verdict is invalid/],
+    [
+      { status: 0, stdout: '{"ok":false,"error":true,"reasons":["review gate error: boom"]}' },
+      /review gate error: review gate error: boom/,
+    ],
   ];
   for (const [result, pattern] of failures) {
     if (pattern) {
@@ -3528,6 +3682,12 @@ test('defaultReviewGate maps spawn output and errors to verdicts', () => {
   })({ repo: APP_REPO, pr: 12, head: APP_SHA });
   assert.equal(inherited[0].options.env.GH_TOKEN, '');
   assert.equal(inherited[0].args.includes('12'), true);
+  assert.deepEqual(
+    defaultReviewGate({ env, spawn: () => ({ status: 0, stdout: '{"ok":true,"error":false,"reasons":[]}' }) })({
+      repo: APP_REPO,
+    }),
+    { ok: true, reasons: [] },
+  );
 });
 
 test('runEntry only executes for the entry module and assigns the exit code', async () => {
@@ -4286,17 +4446,120 @@ test('reconcile leaves a young pending and an unsatisfied review-gate pending al
   assert.match(staleOtherLogs.join('\n'), /invalidated/);
 });
 
-test('reconcile leaves a stale review-gate pending on the companion alone', async () => {
+test('reconcile invalidates a stale review-gate pending on the companion when the visited head succeeded', async () => {
   const staleReview = status({
     state: 'pending',
     description: 'review gate not satisfied: DFXswiss/backend#34: missing review',
     createdAt: '2026-01-01T00:00:00Z',
   });
+  for (const name of ['app first', 'backend first']) {
+    const fake = new FakeGitHub({
+      ...openPulls([12], [34]),
+      ...validPairRoutes(),
+      ...appStatuses(APP_SHA, [status({ description: pairDescription() })]),
+      ...backendStatuses(BACKEND_SHA, [staleReview]),
+      ...localRunRoutes({
+        repo: APP_REPO,
+        sha: APP_SHA,
+        runId: 10,
+        jobId: 101,
+        path: '.github/workflows/pr.yml',
+      }),
+      ...localRunRoutes({
+        repo: BACKEND_REPO,
+        sha: BACKEND_SHA,
+        runId: 20,
+        jobId: 201,
+        path: '.github/workflows/api-pr.yaml',
+      }),
+      [`POST /repos/DFXswiss/app/statuses/${APP_SHA}`]: { id: 1 },
+      [`POST /repos/DFXswiss/backend/statuses/${BACKEND_SHA}`]: { id: 2 },
+    });
+    if (name === 'backend first') {
+      fake.routes['GET /repos/DFXswiss/app/pulls?state=open&per_page=100'] = [];
+      fake.routes['GET /repos/DFXswiss/app/pulls/12'] = appPull(12);
+    }
+    const { deps: injected, logs } = deps(fake, {
+      now: () => Date.parse('2026-01-01T03:00:00Z'),
+      reviewGate: async ({ repo }) => ({ ok: repo !== BACKEND_REPO, reasons: ['missing review'] }),
+    });
+    assert.equal(await main(['reconcile'], { ...injected, env: reconcileEnv() }), 0, name);
+    const posted = fake.statusPosts();
+    assert.equal(posted.filter((post) => post.body.description === 'pair re-evaluation pending').length, 2, name);
+    assert.equal(new Set(posted.map((post) => post.key)).size, 2, name);
+    assert.deepEqual(
+      fake.reruns().map((call) => call.key).sort(),
+      [
+        'POST /repos/DFXswiss/app/actions/jobs/101/rerun',
+        'POST /repos/DFXswiss/backend/actions/jobs/201/rerun',
+      ],
+      name,
+    );
+    assert.match(logs.join('\n'), /invalidated/, name);
+  }
+});
+
+test('reconcile leaves both stale review-gate pendings unchanged', async () => {
+  const staleReview = status({
+    state: 'pending',
+    description: 'review gate not satisfied: missing review',
+    createdAt: '2026-01-01T00:00:00Z',
+  });
+  const fake = new FakeGitHub({
+    ...openPulls([12], [34]),
+    ...validPairRoutes(),
+    ...appStatuses(APP_SHA, [staleReview]),
+    ...backendStatuses(BACKEND_SHA, [staleReview]),
+  });
+  const { deps: injected, logs } = deps(fake, {
+    now: () => Date.parse('2026-01-01T03:00:00Z'),
+    reviewGate: async () => ({ ok: false, reasons: ['missing review'] }),
+  });
+  assert.equal(await main(['reconcile'], { ...injected, env: reconcileEnv() }), 0);
+  assert.equal(fake.statusPosts().length, 0);
+  assert.equal(fake.reruns().length, 0);
+  assert.match(logs.join('\n'), /review gate is still not satisfied/);
+});
+
+test('reconcile invalidates when another open head has no App status', async () => {
+  const staleReview = status({
+    state: 'pending',
+    description: 'review gate not satisfied: missing review',
+    createdAt: '2026-01-01T00:00:00Z',
+  });
+  const fake = new FakeGitHub({
+    ...openPulls([12], [34]),
+    ...validPairRoutes(),
+    ...appStatuses(APP_SHA, [staleReview]),
+    ...backendStatuses(BACKEND_SHA, []),
+    ...localRunRoutes({ repo: APP_REPO, sha: APP_SHA, runId: 10, jobId: 101, path: '.github/workflows/pr.yml' }),
+    ...localRunRoutes({ repo: BACKEND_REPO, sha: BACKEND_SHA, runId: 20, jobId: 201, path: '.github/workflows/api-pr.yaml' }),
+    [`POST /repos/DFXswiss/app/statuses/${APP_SHA}`]: { id: 1 },
+    [`POST /repos/DFXswiss/backend/statuses/${BACKEND_SHA}`]: { id: 2 },
+  });
+  const { deps: injected, logs } = deps(fake, {
+    now: () => Date.parse('2026-01-01T03:00:00Z'),
+    reviewGate: async ({ repo }) => ({ ok: repo !== BACKEND_REPO, reasons: ['missing review'] }),
+  });
+  assert.equal(await main(['reconcile'], { ...injected, env: reconcileEnv() }), 0);
+  assert.equal(fake.statusPosts().filter((post) => post.body.description === 'pair re-evaluation pending').length, 2);
+  assert.equal(fake.reruns().length, 2);
+  assert.match(logs.join('\n'), /invalidated/);
+});
+
+test('reconcile leaves a stale review-gate pending when the other side has no open head', async () => {
+  const mergedBackend = backendPull(34, { state: 'closed', merged: true });
+  const staleReview = status({
+    state: 'pending',
+    description: 'review gate not satisfied: DFXswiss/app#12: missing review',
+    createdAt: '2026-01-01T00:00:00Z',
+  });
   const fake = new FakeGitHub({
     ...openPulls([12]),
-    ...validPairRoutes(),
-    ...appStatuses(APP_SHA, [status({ description: pairDescription() })]),
-    ...backendStatuses(BACKEND_SHA, [staleReview]),
+    ...validPairRoutes({ backend: mergedBackend }),
+    ...appStatuses(APP_SHA, [staleReview]),
+    ...localRunRoutes({ repo: APP_REPO, sha: APP_SHA, runId: 10, jobId: 101, path: '.github/workflows/pr.yml' }),
+    [`POST /repos/DFXswiss/app/statuses/${APP_SHA}`]: { id: 1 },
   });
   const { deps: injected, logs } = deps(fake, {
     now: () => Date.parse('2026-01-01T03:00:00Z'),

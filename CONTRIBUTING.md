@@ -521,6 +521,12 @@ notification. After an invalidation it also reruns the local required
 `Full-stack E2E` jobs, and it replaces a running marker whose shared run ended
 without a result with a terminal `failure`, then reruns those local jobs so a
 later trigger can start a new shared run.
+Reconcile leaves a stale review-gate pending only when every open head carries
+that marker; otherwise it posts `pending`, reruns both local jobs, and publishes
+the gate result. A close-path inspection error and an internal review-gate error
+are failures, never review-pending verdicts. The resolve job sets up Node 24
+before any CLI step, and a final cleanup step fails closed after an earlier
+failure before the CLI runs.
 
 Administrators provision the GitHub App on `DFXswiss/app` and
 `DFXswiss/backend` with commit-status read/write, Actions read/write, Contents

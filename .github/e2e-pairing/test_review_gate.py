@@ -125,9 +125,8 @@ class ReviewGateTests(unittest.TestCase):
 
     def test_unknown_guard_login_fails(self):
         with mock.patch.object(self.gate, "GitHubApi", lambda token: FakeApi(user_status=404)):
-            ok, reasons = self.gate.evaluate(APP_REPO, 12, HEAD, "token", "unknown[bot]")
-        self.assertFalse(ok)
-        self.assertEqual(reasons, ["review gate error: A38 guard identity unavailable"])
+            with self.assertRaisesRegex(GuardError, "A38 guard identity unavailable"):
+                self.gate.evaluate(APP_REPO, 12, HEAD, "token", "unknown[bot]")
 
     def test_guard_login_for_each_repository(self):
         self.assertEqual(self.gate.guard_login_for(APP_REPO), "github-actions[bot]")
@@ -177,9 +176,8 @@ class ReviewGateTests(unittest.TestCase):
         for name in ("select_review_comment", "review_rules_bound", "_head_committed_at", "_covering_review_heads"):
             saved = getattr(review, name)
             delattr(review, name)
-            ok, reasons = self.gate.evaluate(APP_REPO, 12, HEAD, "token", "github-actions[bot]")
-            self.assertFalse(ok)
-            self.assertEqual(reasons, ["review gate error: review gate helper unavailable"])
+            with self.assertRaisesRegex(RuntimeError, "review gate helper unavailable"):
+                self.gate.evaluate(APP_REPO, 12, HEAD, "token", "github-actions[bot]")
             setattr(review, name, saved)
 
         review.review_rules_bound = lambda api, repo, base_sha: None
@@ -220,7 +218,49 @@ class ReviewGateTests(unittest.TestCase):
         output = io.StringIO()
         with mock.patch.dict(self.gate.os.environ, {}, clear=True), redirect_stdout(output):
             self.assertEqual(self.gate.main(["--repo", APP_REPO, "--pr", "12", "--head", HEAD]), 0)
-        self.assertEqual(json.loads(output.getvalue()), {"ok": False, "reasons": ["review gate error: GH_TOKEN unavailable"]})
+        self.assertEqual(
+            json.loads(output.getvalue()),
+            {"ok": False, "error": True, "reasons": ["review gate error: GH_TOKEN unavailable"]},
+        )
+
+    def test_main_marks_gate_exceptions_and_keeps_normal_negative_verdicts(self):
+        output = io.StringIO()
+        with mock.patch.dict(self.gate.os.environ, {"GH_TOKEN": "token"}, clear=True), mock.patch.object(
+            self.gate,
+            "guard_login_for",
+            side_effect=RuntimeError("guard map offline"),
+        ), redirect_stdout(output):
+            self.assertEqual(self.gate.main(["--repo", APP_REPO, "--pr", "12", "--head", HEAD]), 0)
+        self.assertEqual(
+            json.loads(output.getvalue()),
+            {"ok": False, "error": True, "reasons": ["review gate error: guard map offline"]},
+        )
+
+        sys.modules["agent_cli.a38_review"].evaluate_review_gate = lambda api, **kwargs: (False, ["missing review"])
+        output = io.StringIO()
+        with mock.patch.dict(self.gate.os.environ, {"GH_TOKEN": "token"}, clear=True), mock.patch.object(
+            self.gate,
+            "GitHubApi",
+            lambda token: FakeApi(token),
+        ), mock.patch.object(
+            self.gate, "guard_login_for", return_value="github-actions[bot]"
+        ), redirect_stdout(output):
+            self.assertEqual(self.gate.main(["--repo", APP_REPO, "--pr", "12", "--head", HEAD]), 0)
+        self.assertEqual(json.loads(output.getvalue()), {"ok": False, "reasons": ["missing review"]})
+
+        output = io.StringIO()
+        with mock.patch.dict(self.gate.os.environ, {"GH_TOKEN": "token"}, clear=True), mock.patch.object(
+            self.gate, "guard_login_for", return_value="github-actions[bot]"
+        ), mock.patch.object(
+            self.gate,
+            "evaluate",
+            side_effect=RuntimeError("gate crashed"),
+        ), redirect_stdout(output):
+            self.assertEqual(self.gate.main(["--repo", APP_REPO, "--pr", "12", "--head", HEAD]), 0)
+        self.assertEqual(
+            json.loads(output.getvalue()),
+            {"ok": False, "error": True, "reasons": ["review gate error: gate crashed"]},
+        )
 
 
 if __name__ == "__main__":

@@ -72,6 +72,11 @@ jobs:
           path: trusted-e2e-pairing
           persist-credentials: false
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+
       - name: Mint pairing App token
         id: app-token
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
@@ -196,6 +201,7 @@ jobs:
           close
 
       - name: Invalidate stale attestations
+        id: invalidate
         if: steps.side.outputs.invalidate == 'true'
         env:
           START_REPO: ${{ steps.side.outputs.start_repo }}
@@ -318,6 +324,16 @@ jobs:
             exit 1
           fi
           echo 'Ignored: the event is not a pull-request review comment or pairing dispatch.'
+
+      - name: Fail closed after an earlier step failed
+        if: failure() && steps.app-token.outcome == 'success' && steps.side.outputs.start_pr != '' && steps.resolve.outcome != 'failure' && steps.invalidate.outcome != 'failure'
+        env:
+          START_REPO: ${{ steps.side.outputs.start_repo }}
+          START_PR: ${{ steps.side.outputs.start_pr }}
+          E2E_PAIR_APP_SLUG: ${{ vars.E2E_PAIR_APP_SLUG }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node trusted-e2e-pairing/.github/e2e-pairing/cli.mjs fail-closed
 
   run:
     name: Run paired stack
@@ -647,7 +663,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: '24.x'
 
       - name: Mint pairing App token
         id: app-token
