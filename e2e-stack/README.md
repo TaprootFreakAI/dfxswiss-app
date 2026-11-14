@@ -195,13 +195,14 @@ the old result. Review comments do not cancel a running shared run. A backend
 as a hint to find the previous companion at that SHA. The coordinator cancels
 a run only after the re-resolved heads prove that a head of the pair moved.
 Merge order is free for merges into `develop`: a merged companion is resolved
-through its merge commit, and the remaining open side is re-run and
-re-attested. A companion closed without merge or merged into another base posts
-`failure` on the open companion. If both sides are merged, nothing is run. A
-green paired run proves that the exact app and backend heads started together
-against a real Postgres database and passed the full suite and route gate. It
-does not prove external providers, money movement, the migration chain, or a
-future merge result.
+through its immutable merge commit, and the remaining open side is
+re-resolved, re-reviewed and re-attested against the companion's merge
+commit. A companion closed without merge or merged into `main` or any other
+base posts `failure` on the open companion. If both sides are merged,
+nothing is run. A green paired run proves that the exact app and backend
+heads started together against a real Postgres database and passed the full
+suite and route gate. It does not prove external providers, money movement,
+the migration chain, or a future merge result.
 The coordinator also reconciles every open paired pull request in both
 repositories every 30 minutes, on any base, and repairs divergent and stale
 pending statuses. It catches a retarget away from `develop` and any lost
